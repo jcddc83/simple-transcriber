@@ -14,11 +14,11 @@ Paste a YouTube link or a podcast URL, get back a transcript with:
 - Paragraph bookmarks collected at the top as "Saved quotes"
 - A browsable library of every transcript you've made
 
-Built as a personal replacement for [Scroll](https://scroll.is), which shut down in 2026 and had offered free access for journalists and freelancers.
+Built as a personal replacement for [Scroll](https://www.scroll.ai/), which shut down in 2026 and had offered free access for journalists and freelancers.
 Uses [Groq's `whisper-large-v3`](https://console.groq.com) for transcription and
 [AssemblyAI](https://www.assemblyai.com) for speaker diarization.
 
-If you're looking for more robustness or a Docker setup, try [Easy Transcriber](https://github.com/readtedium/easy-transcriber/) from [ReadTedium](https://github.com/readtedium).
+If you're looking for a more robust but still easy-to-install version and/or a Docker setup, try [Easy Transcriber](https://github.com/readtedium/easy-transcriber/) from [ReadTedium](https://github.com/readtedium).
 
 ---
 
