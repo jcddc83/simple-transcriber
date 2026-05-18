@@ -116,8 +116,8 @@ themselves, the library — stays on your machine.
 If you'd rather run the Python directly:
 
 ```cmd
-git clone https://github.com/jdasilva83/transcriber.git
-cd transcriber
+git clone git clone https://github.com/jcddc83/simple-transcriber.git
+cd simple-transcriber
 pip install -r requirements.txt
 python transcribe.py
 ```
