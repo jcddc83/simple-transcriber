@@ -1,0 +1,7 @@
+yt-dlp>=2024.10.0
+groq>=0.11.0
+assemblyai>=0.34.0
+jinja2>=3.1.0
+pywebview>=5.0.0
+pyinstaller>=6.10.0
+send2trash>=1.8.0

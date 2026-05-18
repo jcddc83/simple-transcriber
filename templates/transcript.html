@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ meta.title }}</title>
+<style>{{ css }}</style>
+</head>
+<body>
+<nav class="topnav">
+  <a class="nav-primary" href="../index.html">← Back to Library</a>
+  <button id="nav-home" style="display:none">⌂ Home</button>
+  <button id="reset-speakers" title="Revert all speaker labels to their original names">Reset speakers</button>
+  <button id="export-txt" title="Download transcript as plain text file">↓ Export .txt</button>
+  <button id="export-md" title="Download transcript as Markdown file">↓ Export .md</button>
+  <button id="copy-all" style="margin-left:auto" title="Copy full transcript to clipboard">⎘ Copy transcript</button>
+</nav>
+<div id="find-bar" hidden>
+  <input id="find-input" type="search" placeholder="Find in transcript…" autocomplete="off" spellcheck="false">
+  <span id="find-count"></span>
+  <button id="find-prev" title="Previous match (Shift+Enter)">↑</button>
+  <button id="find-next" title="Next match (Enter)">↓</button>
+  <button id="find-close" title="Close (Escape)">✕</button>
+</div>
+<main class="transcript">
+  <section id="saved-quotes" hidden>
+    <h2>Saved quotes</h2>
+    <ul id="sq-list"></ul>
+  </section>
+  <header class="meta">
+    <h1 id="transcript-title" contenteditable="true" spellcheck="false">{{ meta.title }}</h1>
+    <div class="meta-row">
+      <span class="source source-{{ meta.platform }}">
+        {% if meta.platform == 'youtube' %}▶ YouTube
+        {% elif meta.platform == 'podcast' %}🎙 Podcast
+        {% else %}📄 Source
+        {% endif %}
+      </span>
+      {% if meta.channel %}<span class="channel">{{ meta.channel }}</span>{% endif %}
+      {% if meta.upload_date %}<span class="date">{{ meta.upload_date }}</span>{% endif %}
+      <a class="original" href="{{ meta.url }}" target="_blank" rel="noopener">Original ↗</a>
+    </div>
+  </header>
+
+  <section class="paragraphs">
+    {% for p in paragraphs %}
+    <article class="paragraph" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
+      <button class="play" title="Play paragraph" aria-label="Play paragraph">▶</button>
+      <div class="head">
+        <span class="speaker" data-original="{{ p.speaker }}" title="Click to rename this speaker">{{ p.speaker }}</span>
+        <span class="ts">{{ p.start_label }}</span>
+        <button class="bookmark" title="Bookmark this paragraph">☆</button>
+        <button class="copy-quote" title="Copy quote with speaker and timestamp">⎘</button>
+      </div>
+      <p class="text" contenteditable="true" spellcheck="false">{% if p.words %}{% for w in p.words %}<span class="word" data-start="{{ '%.3f'|format(w.start) }}">{{ w.word }}</span> {% endfor %}{% else %}{{ p.text }}{% endif %}</p>
+    </article>
+    {% endfor %}
+  </section>
+</main>
+
+<footer class="player">
+  <audio id="audio" src="{{ meta.audio_filename }}" preload="metadata"></audio>
+  <button id="back10" title="Back 10s">⟲10</button>
+  <button id="prev" title="Previous paragraph">|◀</button>
+  <button id="playpause" title="Play / Pause">▶</button>
+  <button id="next" title="Next paragraph">▶|</button>
+  <button id="fwd10" title="Forward 10s">10⟳</button>
+  <select id="speed" title="Playback speed">
+    <option value="0.75">0.75x</option>
+    <option value="1" selected>1x</option>
+    <option value="1.25">1.25x</option>
+    <option value="1.5">1.5x</option>
+    <option value="2">2x</option>
+  </select>
+  <span id="cur" class="time">0:00</span>
+  <input id="seek" type="range" min="0" max="0" step="0.1" value="0">
+  <span id="dur" class="time">0:00</span>
+  <button id="save-btn" title="Save speaker label edits back to this file">Save edits</button>
+</footer>
+
+<button id="follow-pill" hidden>↓ Jump to now</button>
+
+<script>
+const audio = document.getElementById('audio');
+const playpause = document.getElementById('playpause');
+const seek = document.getElementById('seek');
+const cur = document.getElementById('cur');
+const dur = document.getElementById('dur');
+const speed = document.getElementById('speed');
+const paragraphs = Array.from(document.querySelectorAll('.paragraph'));
+const wordSpans = Array.from(document.querySelectorAll('.word[data-start]'));
+let activeWordEl = null;
+
+function fmt(t) {
+  if (!isFinite(t)) return '0:00';
+  const s = Math.floor(t % 60).toString().padStart(2, '0');
+  const m = Math.floor(t / 60);
+  const h = Math.floor(t / 3600);
+  return h > 0 ? `${h}:${(m % 60).toString().padStart(2,'0')}:${s}` : `${m}:${s}`;
+}
+
+audio.addEventListener('loadedmetadata', () => {
+  seek.max = audio.duration;
+  dur.textContent = fmt(audio.duration);
+});
+
+audio.addEventListener('timeupdate', () => {
+  seek.value = audio.currentTime;
+  cur.textContent = fmt(audio.currentTime);
+  updateActive();
+  updateActiveWord();
+});
+
+function updateActiveWord() {
+  if (!wordSpans.length) return;
+  const t = audio.currentTime;
+  let lo = 0, hi = wordSpans.length - 1, found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (parseFloat(wordSpans[mid].dataset.start) <= t) { found = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  const foundEl = found >= 0 ? wordSpans[found] : null;
+  if (foundEl !== activeWordEl) {
+    if (activeWordEl) activeWordEl.classList.remove('active-word');
+    if (foundEl) foundEl.classList.add('active-word');
+    activeWordEl = foundEl;
+  }
+}
+
+audio.addEventListener('play',  () => { playpause.textContent = '❚❚'; });
+audio.addEventListener('pause', () => { playpause.textContent = '▶'; });
+
+playpause.addEventListener('click', () => audio.paused ? audio.play() : audio.pause());
+seek.addEventListener('input', () => { audio.currentTime = parseFloat(seek.value); });
+speed.addEventListener('change', () => { audio.playbackRate = parseFloat(speed.value); });
+
+document.getElementById('back10').addEventListener('click', () => { audio.currentTime = Math.max(0, audio.currentTime - 10); });
+document.getElementById('fwd10').addEventListener('click', () => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + 10); });
+
+document.getElementById('prev').addEventListener('click', () => seekToParagraph(-1));
+document.getElementById('next').addEventListener('click', () => seekToParagraph(1));
+
+function currentIndex() {
+  const t = audio.currentTime;
+  let idx = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    if (parseFloat(paragraphs[i].dataset.start) <= t) idx = i;
+    else break;
+  }
+  return idx;
+}
+
+function seekToParagraph(delta) {
+  const i = Math.max(0, Math.min(paragraphs.length - 1, currentIndex() + delta));
+  audio.currentTime = parseFloat(paragraphs[i].dataset.start);
+  audio.play();
+  reengageFollow();
+}
+
+// ---- Auto-follow: scroll active paragraph into view on paragraph change ----
+const followPill = document.getElementById('follow-pill');
+let following = true;
+let lastIdx = -1;
+let programmaticScrollUntil = 0;
+
+function scrollToActive() {
+  const el = paragraphs[lastIdx];
+  if (!el) return;
+  programmaticScrollUntil = Date.now() + 700;
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+function updateActive() {
+  const i = currentIndex();
+  paragraphs.forEach((p, k) => p.classList.toggle('active', k === i));
+  if (i !== lastIdx) {
+    lastIdx = i;
+    if (following) scrollToActive();
+  }
+}
+
+function reengageFollow() {
+  following = true;
+  followPill.hidden = true;
+  // Defer so the seek's resulting timeupdate updates lastIdx first.
+  setTimeout(scrollToActive, 0);
+}
+
+window.addEventListener('scroll', () => {
+  if (Date.now() < programmaticScrollUntil) return;
+  if (following) {
+    following = false;
+    followPill.hidden = false;
+  }
+}, { passive: true });
+
+followPill.addEventListener('click', reengageFollow);
+
+paragraphs.forEach((p) => {
+  p.querySelector('.play').addEventListener('click', () => {
+    audio.currentTime = parseFloat(p.dataset.start);
+    audio.play();
+    reengageFollow();
+  });
+});
+
+// Inline text editing: Enter commits/exits, don't allow line breaks within a paragraph
+document.querySelectorAll('.text').forEach(el => {
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+  });
+});
+
+// Copy quote button: copies `"text" — Speaker [0:00]` to clipboard
+document.querySelectorAll('.copy-quote').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const para = btn.closest('.paragraph');
+    const text = para.querySelector('.text').textContent.trim();
+    const speaker = para.querySelector('.speaker').textContent.trim();
+    const ts = para.querySelector('.ts').textContent.trim();
+    const formatted = `"${text}" — ${speaker} [${ts}]`;
+    try {
+      await navigator.clipboard.writeText(formatted);
+      const orig = btn.textContent;
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = orig; }, 1200);
+    } catch (e) {
+      console.error('Copy failed', e);
+    }
+  });
+});
+
+// Speaker rename: click to rename just this label; confirm to rename all matching
+document.querySelectorAll('.speaker').forEach(el => {
+  el.style.cursor = 'pointer';
+  el.addEventListener('click', () => {
+    const oldName = el.textContent.trim();
+    const newName = prompt(`Rename this label:`, oldName);
+    if (!newName || !newName.trim() || newName.trim() === oldName) return;
+    el.textContent = newName.trim();
+    if (confirm(`Also rename all other "${oldName}" labels?`)) {
+      document.querySelectorAll('.speaker').forEach(s => {
+        if (s.textContent.trim() === oldName) s.textContent = newName.trim();
+      });
+    }
+  });
+});
+
+document.getElementById('save-btn').addEventListener('click', async () => {
+  const html = '<!doctype html>\n' + document.documentElement.outerHTML;
+  const btn = document.getElementById('save-btn');
+
+  if (window.pywebview) {
+    const parts = location.pathname.split('/').map(p => decodeURIComponent(p));
+    const txIdx = parts.findIndex(p => p === 'Transcripts');
+    const relPath = txIdx >= 0 ? parts.slice(txIdx + 1).join('/') : parts[parts.length - 1];
+    await pywebview.api.save_transcript(html, relPath);
+    btn.textContent = 'Saved ✓';
+    setTimeout(() => { btn.textContent = 'Save edits'; }, 2000);
+    return;
+  }
+
+  // Browser fallback: file picker (Chrome/Edge) or plain download.
+  const blob = new Blob([html], { type: 'text/html' });
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: decodeURIComponent(location.pathname.split('/').pop()),
+        types: [{ description: 'HTML file', accept: { 'text/html': ['.html'] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+    } catch (e) {
+      if (e.name !== 'AbortError') fallbackDownload(blob);
+    }
+  } else {
+    fallbackDownload(blob);
+  }
+});
+
+// Nav: show "New transcription" button when running inside pywebview
+(function() {
+  const btn = document.getElementById('nav-home');
+  function initNav() {
+    btn.style.display = '';
+    btn.addEventListener('click', async () => {
+      const url = await pywebview.api.show_home();
+      window.location.href = url;
+    });
+  }
+  if (window.pywebview) { initNav(); }
+  else { window.addEventListener('pywebviewready', initNav); }
+})();
+
+// Editable transcript title: Enter commits, blur syncs <title>
+const titleEl = document.getElementById('transcript-title');
+titleEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); }
+});
+titleEl.addEventListener('blur', () => {
+  const text = titleEl.textContent.trim();
+  if (text) document.title = text;
+});
+
+// Reset all speaker labels to their original (generated) names
+document.getElementById('reset-speakers').addEventListener('click', () => {
+  document.querySelectorAll('.speaker').forEach(el => {
+    el.textContent = el.dataset.original;
+  });
+});
+
+// Copy full transcript to clipboard
+document.getElementById('copy-all').addEventListener('click', async () => {
+  const btn = document.getElementById('copy-all');
+  const lines = [];
+  paragraphs.forEach(p => {
+    const speaker = p.querySelector('.speaker').textContent.trim();
+    const ts = p.querySelector('.ts').textContent.trim();
+    const text = p.querySelector('.text').textContent.trim();
+    lines.push(`${speaker} [${ts}]\n${text}`);
+  });
+  try {
+    await navigator.clipboard.writeText(lines.join('\n\n'));
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  } catch (e) {
+    console.error('Copy failed', e);
+  }
+});
+
+// Shared helper: build export content from current DOM state
+function buildExportContent(format) {
+  const title = document.getElementById('transcript-title').textContent.trim();
+  const metaRow = document.querySelector('.meta-row');
+  const channel = metaRow.querySelector('.channel')?.textContent.trim() || '';
+  const date = metaRow.querySelector('.date')?.textContent.trim() || '';
+  const url = metaRow.querySelector('.original')?.href || '';
+  const safe = title.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'transcript';
+
+  const body = paragraphs.map(p => {
+    const speaker = p.querySelector('.speaker').textContent.trim();
+    const ts = p.querySelector('.ts').textContent.trim();
+    const text = p.querySelector('.text').textContent.trim();
+    return format === 'md' ? `**${speaker}** [${ts}]\n${text}` : `${speaker} [${ts}]\n${text}`;
+  }).join('\n\n');
+
+  let content, mimeType, filename;
+  if (format === 'md') {
+    const meta = [channel, date].filter(Boolean).join(' · ');
+    const hdr = `# ${title}\n${meta}${meta && url ? ' | ' : ''}${url ? `[Original](${url})` : ''}\n\n---`;
+    content = `${hdr}\n\n${body}`;
+    mimeType = 'text/markdown';
+    filename = safe + '.md';
+  } else {
+    const hdr = [title, [channel, date].filter(Boolean).join(' · '), url].filter(Boolean).join('\n');
+    content = `${hdr}\n\n---\n\n${body}`;
+    mimeType = 'text/plain';
+    filename = safe + '.txt';
+  }
+  return { content, mimeType, filename };
+}
+
+// Export as .txt or .md — opens save dialog when available, falls back to download
+async function exportTranscript(format) {
+  const { content, mimeType, filename } = buildExportContent(format);
+  const blob = new Blob([content], { type: mimeType });
+  const description = format === 'md' ? 'Markdown file' : 'Text file';
+  const ext = '.' + format;
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description, accept: { [mimeType]: [ext] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+    }
+  }
+  fallbackDownload(blob, filename);
+}
+
+document.getElementById('export-txt').addEventListener('click', () => exportTranscript('txt'));
+document.getElementById('export-md').addEventListener('click',  () => exportTranscript('md'));
+
+// In-page find (Ctrl+F / Cmd+F) — highlights matching paragraphs, steps through them.
+// Operates on .paragraph elements so word spans used for playback are never disturbed.
+(function initFind() {
+  const bar      = document.getElementById('find-bar');
+  const input    = document.getElementById('find-input');
+  const countEl  = document.getElementById('find-count');
+  let matches = [], current = -1;
+
+  function clearHighlights() {
+    matches.forEach(p => p.classList.remove('find-match', 'find-match-active'));
+    matches = []; current = -1; countEl.textContent = '';
+  }
+
+  function showCurrent() {
+    matches.forEach((p, i) =>
+      p.classList.toggle('find-match-active', i === current));
+    countEl.textContent = matches.length ? `${current + 1} / ${matches.length}` : '';
+    if (matches[current]) matches[current].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function runFind(q) {
+    clearHighlights();
+    if (!q) return;
+    const lower = q.toLowerCase();
+    document.querySelectorAll('.paragraph').forEach(p => {
+      if (p.querySelector('.text').textContent.toLowerCase().includes(lower)) {
+        p.classList.add('find-match');
+        matches.push(p);
+      }
+    });
+    if (matches.length) { current = 0; showCurrent(); }
+    else countEl.textContent = 'No matches';
+  }
+
+  function openBar()  { bar.hidden = false; input.focus(); input.select(); }
+  function closeBar() { bar.hidden = true; clearHighlights(); input.value = ''; }
+
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openBar(); }
+    if (e.key === 'Escape' && !bar.hidden) closeBar();
+  });
+
+  input.addEventListener('input', () => runFind(input.value.trim()));
+  input.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || !matches.length) return;
+    e.preventDefault();
+    current = e.shiftKey
+      ? (current - 1 + matches.length) % matches.length
+      : (current + 1) % matches.length;
+    showCurrent();
+  });
+
+  document.getElementById('find-prev').addEventListener('click', () => {
+    if (!matches.length) return;
+    current = (current - 1 + matches.length) % matches.length; showCurrent();
+  });
+  document.getElementById('find-next').addEventListener('click', () => {
+    if (!matches.length) return;
+    current = (current + 1) % matches.length; showCurrent();
+  });
+  document.getElementById('find-close').addEventListener('click', closeBar);
+})();
+
+// Keyboard shortcuts: Space = play/pause, ←/→ = ±10s
+// Suppressed when focus is inside an editable element or form control
+document.addEventListener('keydown', e => {
+  const tag = document.activeElement.tagName;
+  if (document.activeElement.isContentEditable ||
+      tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return;
+  if (e.key === ' ') {
+    e.preventDefault();
+    audio.paused ? audio.play() : audio.pause();
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    audio.currentTime = Math.max(0, audio.currentTime - 10);
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + 10);
+  }
+});
+
+// Bookmarks: toggle .bookmarked + ★/☆; collect into Saved Quotes section.
+// Persists in the saved HTML because the class stays in the DOM.
+const sqSection = document.getElementById('saved-quotes');
+const sqList = document.getElementById('sq-list');
+
+function syncSavedQuotes() {
+  const marked = document.querySelectorAll('.paragraph.bookmarked');
+  sqList.innerHTML = '';
+  marked.forEach(p => {
+    const speaker = p.querySelector('.speaker').textContent.trim();
+    const ts = p.querySelector('.ts').textContent.trim();
+    const text = p.querySelector('.text').textContent.trim();
+    const snippet = text.length > 140 ? text.slice(0, 140).trimEnd() + '…' : text;
+    const li = document.createElement('li');
+    li.className = 'sq-item';
+    li.innerHTML = `<strong>${speaker}</strong> <span class="sq-ts">[${ts}]</span> ${snippet} <a class="sq-jump" href="#${p.id}">↗ jump</a>`;
+    sqList.appendChild(li);
+  });
+  sqSection.hidden = marked.length === 0;
+}
+
+document.querySelectorAll('.bookmark').forEach(btn => {
+  // Restore filled star if paragraph already bookmarked (from saved HTML)
+  if (btn.closest('.paragraph').classList.contains('bookmarked')) btn.textContent = '★';
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const para = btn.closest('.paragraph');
+    const now = !para.classList.contains('bookmarked');
+    para.classList.toggle('bookmarked', now);
+    btn.textContent = now ? '★' : '☆';
+    syncSavedQuotes();
+  });
+});
+
+syncSavedQuotes();
+
+function fallbackDownload(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename || decodeURIComponent(location.pathname.split('/').pop()) || 'transcript.html';
+  a.click();
+}
+</script>
+</body>
+</html>

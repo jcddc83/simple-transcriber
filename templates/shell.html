@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Simple Transcriber for Podcasts & Videos</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --hover: #f3f4f6;
+  --accent: #6366f1;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+.card {
+  width: 100%;
+  max-width: 480px;
+}
+h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 6px; }
+.subtitle { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: #374151; }
+input[type="text"], input[type="url"], input[type="password"], textarea#url {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.15s;
+  font-family: inherit;
+}
+textarea#url { resize: vertical; line-height: 1.4; min-height: 42px; }
+input:focus, textarea#url:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #eef2ff; }
+.btn-row { display: flex; gap: 8px; margin-top: 12px; }
+button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 14px;
+  cursor: pointer;
+  background: #fff;
+  font-weight: 500;
+  transition: background 0.12s;
+}
+button:hover { background: var(--hover); }
+button.primary { background: #6366f1; color: #fff; border-color: #6366f1; }
+button.primary:hover { background: #4f46e5; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+#status {
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--muted);
+  min-height: 20px;
+}
+#status.error { color: #dc2626; }
+.divider { height: 1px; background: var(--border); margin: 24px 0; }
+.setup-note { font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
+.setup-note a { color: var(--accent); }
+.field { margin-bottom: 14px; }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f172a;
+    --fg: #f1f5f9;
+    --muted: #94a3b8;
+    --border: #334155;
+    --hover: #1e293b;
+    --accent: #818cf8;
+  }
+  label { color: #cbd5e1; }
+  input[type="text"], input[type="url"], input[type="password"], textarea#url {
+    background: #1e293b;
+    color: var(--fg);
+  }
+  input:focus, textarea#url:focus { box-shadow: 0 0 0 3px #1e1b4b; }
+  button { background: #1e293b; color: var(--fg); }
+  button.primary { background: #818cf8; border-color: #818cf8; }
+  button.primary:hover { background: #6366f1; }
+}
+</style>
+</head>
+<body>
+<div class="card">
+
+  <!-- Setup section (shown by default; hidden by JS once keys confirmed) -->
+  <section id="setup">
+    <h1>Simple Transcriber</h1>
+    <p class="subtitle">One-time setup — paste your API keys to get started.</p>
+    <p class="setup-note">
+      Get a free <a href="https://console.groq.com" target="_blank">Groq key</a> and a free
+      <a href="https://www.assemblyai.com/dashboard/signup" target="_blank">AssemblyAI key</a>.
+      Both take under a minute. Keys are saved locally and never leave your machine.
+    </p>
+    <div class="field">
+      <label for="groq-key">Groq API key</label>
+      <input type="password" id="groq-key" placeholder="gsk_...">
+    </div>
+    <div class="field">
+      <label for="aai-key">AssemblyAI API key</label>
+      <input type="password" id="aai-key" placeholder="...">
+    </div>
+    <div class="btn-row">
+      <button class="primary" id="save-keys">Save and continue</button>
+    </div>
+    <p id="setup-status" style="margin-top:12px;font-size:13px;color:#dc2626"></p>
+  </section>
+
+  <!-- Main section -->
+  <section id="main" style="display:none">
+    <h1>Simple Transcriber</h1>
+    <p class="subtitle">Paste a YouTube or podcast URL to generate a transcript.</p>
+    <label for="url">URL <span style="color:var(--muted);font-weight:400">(one per line for a queue)</span></label>
+    <textarea id="url" rows="1" placeholder="https://..." spellcheck="false"></textarea>
+    <div class="field" style="margin-top:12px">
+      <label for="hints">Hints (optional)</label>
+      <input type="text" id="hints" placeholder="e.g. Jane Smith, Acme Corp, EBITDA">
+      <p class="setup-note" style="margin:6px 0 0;font-size:12px">Helps the transcriber spell proper nouns correctly.</p>
+    </div>
+    <div class="btn-row">
+      <button class="primary" id="go">Transcribe</button>
+      <button id="library">View Library</button>
+      <button id="folder">Open Folder</button>
+    </div>
+    <p id="status">Ready.</p>
+  </section>
+
+</div>
+<script>
+let _initialized = false;
+window.addEventListener('pywebviewready', async () => {
+  if (_initialized) return;
+  _initialized = true;
+  const cfg = await pywebview.api.get_config();
+  if (cfg.has_groq && cfg.has_assemblyai) {
+    document.getElementById('setup').style.display = 'none';
+    document.getElementById('main').style.display = '';
+  }
+  // else: setup section is already visible by default
+});
+
+document.getElementById('save-keys').addEventListener('click', async () => {
+  const groq = document.getElementById('groq-key').value.trim();
+  const aai  = document.getElementById('aai-key').value.trim();
+  const err  = document.getElementById('setup-status');
+  if (!groq || !aai) { err.textContent = 'Both keys are required.'; return; }
+  const btn = document.getElementById('save-keys');
+  btn.disabled = true;
+  btn.textContent = 'Checking keys…';
+  err.textContent = '';
+  const result = await pywebview.api.save_api_keys(groq, aai);
+  btn.disabled = false;
+  btn.textContent = 'Save and continue';
+  if (!result || !result.ok) {
+    err.textContent = (result && result.error) || 'Could not save keys.';
+    return;
+  }
+  document.getElementById('setup').style.display = 'none';
+  document.getElementById('main').style.display = '';
+});
+
+document.getElementById('go').addEventListener('click', () => {
+  const url = document.getElementById('url').value.trim();
+  if (!url) { updateStatus('Paste a URL first.'); return; }
+  const hints = document.getElementById('hints').value.trim();
+  document.getElementById('go').disabled = true;
+  updateStatus('Starting...');
+  pywebview.api.transcribe(url, hints);
+});
+
+// In the hints field (single-line input), Enter submits.
+// In the URL field (textarea, supports multiple URLs), only Ctrl/Cmd+Enter submits.
+document.getElementById('hints').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('go').click();
+});
+const urlEl = document.getElementById('url');
+urlEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    document.getElementById('go').click();
+  }
+});
+
+// Update the Transcribe button label as the user types additional URLs.
+urlEl.addEventListener('input', () => {
+  const urls = urlEl.value.split('\n').map(s => s.trim()).filter(Boolean);
+  document.getElementById('go').textContent =
+    urls.length > 1 ? `Transcribe ${urls.length} URLs` : 'Transcribe';
+  // Auto-grow up to 6 rows.
+  urlEl.rows = Math.min(6, Math.max(1, urlEl.value.split('\n').length));
+});
+
+document.getElementById('library').addEventListener('click', async () => {
+  const url = await pywebview.api.open_library();
+  window.location.href = url;
+});
+
+document.getElementById('folder').addEventListener('click', () => {
+  pywebview.api.open_folder();
+});
+
+function updateStatus(msg) {
+  const el = document.getElementById('status');
+  if (el) {
+    el.textContent = msg;
+    el.className = msg.startsWith('Error') ? 'error' : '';
+  }
+}
+
+function onError() {
+  const btn = document.getElementById('go');
+  if (btn) btn.disabled = false;
+}
+</script>
+</body>
+</html>

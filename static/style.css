@@ -1,0 +1,469 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --hover: #f3f4f6;
+  --accent: #6366f1;
+  --youtube: #ff0033;
+  --podcast: #8b5cf6;
+  --player-bg: #fafafa;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  line-height: 1.5;
+}
+
+/* ---------- Transcript page ---------- */
+
+.transcript {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 40px 24px 140px;
+}
+
+.meta h1 {
+  margin: 0 0 16px;
+  font-size: 32px;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+.meta h1[contenteditable] {
+  cursor: text;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin-left: -4px;
+  outline: none;
+}
+.meta h1[contenteditable]:hover { background: var(--hover); }
+.meta h1[contenteditable]:focus { background: #fafafa; box-shadow: 0 0 0 2px var(--accent); }
+
+.meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 14px;
+  margin-bottom: 32px;
+}
+
+.source {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  font-weight: 500;
+  font-size: 13px;
+}
+.source-youtube { background: #ffe5ea; color: var(--youtube); }
+.source-podcast { background: #ede9fe; color: var(--podcast); }
+
+.channel { font-weight: 500; color: #374151; }
+.original { color: var(--accent); text-decoration: none; }
+.original:hover { text-decoration: underline; }
+/* ---------- Top nav (sticky, shown on transcript and library pages) ---------- */
+
+.topnav {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  z-index: 5;
+}
+.topnav a, .topnav button {
+  color: #374151;
+  font-weight: 500;
+  text-decoration: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+  font-family: inherit;
+}
+.topnav a:hover, .topnav button:hover { color: var(--fg); }
+.topnav .nav-primary {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-weight: 500;
+}
+.topnav .nav-primary:hover { background: #4f46e5; color: #fff; }
+
+/* ---------- In-page find bar ---------- */
+
+#find-bar {
+  position: fixed;
+  top: 41px;
+  right: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 0 8px;
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 6;
+  box-shadow: -2px 2px 8px rgba(0,0,0,0.08);
+}
+#find-bar[hidden] { display: none; }
+#find-input {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  width: 200px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+#find-input:focus { outline: none; border-color: var(--accent); }
+#find-count { font-size: 12px; color: var(--muted); min-width: 52px; text-align: center; }
+#find-bar button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+#find-bar button:hover { background: var(--hover); }
+
+.paragraph {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  column-gap: 8px;
+  padding: 12px 8px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+.paragraph:hover { background: var(--hover); }
+.paragraph.active { background: #eef2ff; }
+.paragraph.find-match { background: #fef9c3; }
+.paragraph.find-match-active { background: #fde047; outline: 2px solid #facc15; outline-offset: -2px; }
+
+.play {
+  grid-row: 1 / span 2;
+  align-self: start;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.play:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 2px;
+}
+
+.speaker {
+  font-weight: 600;
+  background: #fce7f3;
+  color: #be185d;
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  cursor: text;
+}
+.speaker:focus { box-shadow: 0 0 0 2px var(--accent); }
+
+.ts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.bookmark {
+  margin-left: auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 16px;
+  padding: 0 4px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  font-family: inherit;
+}
+.paragraph:hover .bookmark { opacity: 1; }
+.paragraph.bookmarked .bookmark { opacity: 1; color: #f59e0b; }
+.bookmark:hover { color: #f59e0b; }
+
+.paragraph.bookmarked { border-left: 3px solid #f59e0b; padding-left: 5px; }
+
+#saved-quotes {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 28px;
+  background: #fffbeb;
+}
+#saved-quotes h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: #92400e; letter-spacing: 0.02em; text-transform: uppercase; }
+#sq-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.sq-item { font-size: 14px; line-height: 1.5; }
+.sq-item .sq-ts { color: var(--muted); font-variant-numeric: tabular-nums; }
+.sq-item .sq-jump { color: var(--accent); text-decoration: none; font-size: 12px; margin-left: 6px; white-space: nowrap; }
+.sq-item .sq-jump:hover { text-decoration: underline; }
+
+.copy-quote {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 0 4px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+.paragraph:hover .copy-quote {
+  opacity: 1;
+  background: #f3f4f6;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.copy-quote:hover { color: var(--accent); background: #eef2ff; border-color: var(--accent); }
+
+.text { margin: 0; font-size: 16px; border-radius: 4px; padding: 2px 4px; outline: none; }
+.text:focus { background: #fafafa; box-shadow: 0 0 0 2px var(--accent); }
+
+.word { display: inline; }
+.word.active-word { background: var(--accent); color: #fff; border-radius: 2px; padding: 0 1px; }
+
+/* ---------- Player ---------- */
+
+.player {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  background: var(--player-bg);
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 14px;
+}
+
+.player button {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.player button:hover { background: var(--hover); }
+
+#playpause { font-weight: bold; min-width: 40px; }
+
+.player select {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #fff;
+}
+
+.time { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 44px; text-align: center; }
+#seek { flex: 1; }
+#save-btn { margin-left: auto; background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 500; }
+
+/* "Jump to now" pill — appears when user scrolls away during playback */
+#follow-pill {
+  position: fixed;
+  right: 20px;
+  bottom: 72px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+}
+#follow-pill:hover { background: #4f46e5; }
+#follow-pill[hidden] { display: none; }
+
+/* ---------- Library page ---------- */
+
+.library {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+
+.lib-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+.lib-header h1 { margin: 0; font-size: 28px; letter-spacing: -0.01em; }
+.lib-actions { display: flex; align-items: center; gap: 16px; }
+.count { color: var(--muted); font-size: 14px; }
+#new-btn {
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+#new-btn:hover { background: #4f46e5; }
+
+#select-btn {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+#select-btn:hover { background: var(--hover); }
+
+#lib-search {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 12px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+  width: 200px;
+  font-family: inherit;
+}
+#lib-search:focus { outline: none; border-color: var(--accent); }
+
+#delete-btn {
+  border: 1px solid #dc2626;
+  background: #dc2626;
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+#delete-btn:hover:not(:disabled) { background: #b91c1c; border-color: #b91c1c; }
+#delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.empty { color: var(--muted); }
+
+.entries { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.entry { border-bottom: 1px solid var(--border); }
+
+.entry-check { display: none; width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; }
+.entries.selecting .entry-check { display: block; }
+
+.row {
+  display: grid;
+  grid-template-columns: 32px 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 8px;
+  text-decoration: none;
+  color: var(--fg);
+}
+.entries.selecting .row { grid-template-columns: 20px 32px 1fr auto; cursor: pointer; }
+.row:hover { background: var(--hover); }
+.entry-check:checked ~ .title { color: var(--accent); }
+
+.icon { font-size: 18px; text-align: center; }
+.icon-youtube { color: var(--youtube); }
+.icon-podcast { color: var(--podcast); }
+
+.row .title { font-weight: 500; }
+.row .date { color: var(--muted); font-size: 13px; white-space: nowrap; }
+
+/* ---------- Dark mode ---------- */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f172a;
+    --fg: #f1f5f9;
+    --muted: #94a3b8;
+    --border: #334155;
+    --hover: #1e293b;
+    --accent: #818cf8;
+    --player-bg: #0d1117;
+  }
+
+  /* Source badges */
+  .source          { background: #1e293b; }
+  .source-youtube  { background: #450a0a; }
+  .source-podcast  { background: #2e1065; }
+
+  /* Channel label and topnav secondary buttons */
+  .channel                        { color: #cbd5e1; }
+  .topnav a, .topnav button       { color: #cbd5e1; }
+  .topnav a:hover, .topnav button:hover { color: var(--fg); }
+
+  /* Active paragraph highlight */
+  .paragraph.active { background: #1e1b4b; }
+
+  /* Play button */
+  .play { background: #1e293b; }
+
+  /* Speaker badge */
+  .speaker { background: #4a0e2a; color: #f9a8d4; }
+
+  /* Copy-quote button */
+  .paragraph:hover .copy-quote { background: #1e293b; }
+  .copy-quote:hover             { background: #1e1b4b; border-color: var(--accent); }
+
+  /* Editable text focus / title focus */
+  .text:focus                        { background: #1e293b; }
+  .meta h1[contenteditable]:focus    { background: #1e293b; }
+
+  /* Word highlight: accent already shifts to #818cf8 in dark, no extra override needed */
+
+  /* Player controls */
+  .player button  { background: #1e293b; color: var(--fg); }
+  .player select  { background: #1e293b; color: var(--fg); }
+
+  /* Library Select button */
+  #select-btn { background: #1e293b; color: var(--fg); }
+
+  /* Saved quotes section */
+  #saved-quotes  { background: #2a1d0f; }
+  #saved-quotes h2 { color: #fcd34d; }
+
+  /* Library search */
+  #lib-search { background: #1e293b; color: var(--fg); }
+
+  /* Find bar */
+  #find-bar { box-shadow: -2px 2px 8px rgba(0,0,0,0.4); }
+  #find-input { background: #1e293b; color: var(--fg); }
+  #find-bar button { background: #1e293b; color: var(--fg); }
+
+  /* Find match highlights */
+  .paragraph.find-match        { background: #422006; }
+  .paragraph.find-match-active { background: #713f12; outline-color: #92400e; }
+}

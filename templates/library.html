@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Transcripts</title>
+<style>{{ css }}</style>
+</head>
+<body>
+<nav class="topnav" id="topnav" style="display:none">
+  <button id="nav-home">⌂ Home</button>
+</nav>
+<main class="library">
+  <header class="lib-header">
+    <h1>Transcripts</h1>
+    <div class="lib-actions">
+      <input type="search" id="lib-search" placeholder="Search titles and transcripts…" autocomplete="off">
+      <span class="count">{{ entries|length }} item{{ '' if entries|length == 1 else 's' }}</span>
+      <button id="select-btn" style="display:none">Select</button>
+      <button id="delete-btn" style="display:none" disabled>Delete</button>
+      <button id="new-btn" style="display:none">⌂ Home</button>
+    </div>
+  </header>
+
+  {% if not entries %}
+    <p class="empty">No transcripts yet. Click "New Transcription" and paste a URL to get started.</p>
+  {% else %}
+  <ul class="entries">
+    {% for e in entries %}
+    <li class="entry" data-folder="{{ e.href.split('/')[0] }}" data-body="{{ e.body_text }}">
+      <a class="row" href="{{ e.href }}">
+        <input type="checkbox" class="entry-check">
+        <span class="icon icon-{{ e.platform }}">
+          {% if e.platform == 'youtube' %}▶
+          {% elif e.platform == 'podcast' %}🎙
+          {% else %}📄
+          {% endif %}
+        </span>
+        <span class="title">{{ e.title }}</span>
+        <span class="date">{{ e.upload_date }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</main>
+<script>
+(function initSearch() {
+  const input = document.getElementById('lib-search');
+  if (!input) return;
+  const countEl = document.querySelector('.count');
+  const totalEntries = document.querySelectorAll('.entry').length;
+  const totalLabel = `${totalEntries} item${totalEntries !== 1 ? 's' : ''}`;
+  input.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    let shown = 0;
+    document.querySelectorAll('.entry').forEach(li => {
+      const title = li.querySelector('.title')?.textContent.toLowerCase() || '';
+      const date  = li.querySelector('.date')?.textContent.toLowerCase()  || '';
+      const body  = li.dataset.body?.toLowerCase() || '';
+      const match = !q || title.includes(q) || date.includes(q) || body.includes(q);
+      li.hidden = !match;
+      if (match) shown++;
+    });
+    countEl.textContent = q ? `${shown} result${shown !== 1 ? 's' : ''}` : totalLabel;
+  });
+})();
+
+function initPywebview() {
+  document.getElementById('topnav').style.display = '';
+  async function goHome() {
+    const url = await pywebview.api.show_home();
+    window.location.href = url;
+  }
+  document.getElementById('nav-home').addEventListener('click', goHome);
+  const headerBtn = document.getElementById('new-btn');
+  headerBtn.style.display = '';
+  headerBtn.addEventListener('click', goHome);
+
+  // Select-to-delete (pywebview only — requires Python bridge for send2trash)
+  const selectBtn = document.getElementById('select-btn');
+  const deleteBtn = document.getElementById('delete-btn');
+  const entriesList = document.querySelector('.entries');
+  if (!entriesList) return;  // no entries, nothing to delete
+
+  selectBtn.style.display = '';
+  let selecting = false;
+
+  function updateDeleteBtn() {
+    const n = document.querySelectorAll('.entry-check:checked').length;
+    deleteBtn.disabled = n === 0;
+    deleteBtn.textContent = n > 0 ? `Delete ${n}` : 'Delete';
+  }
+
+  selectBtn.addEventListener('click', () => {
+    selecting = !selecting;
+    entriesList.classList.toggle('selecting', selecting);
+    selectBtn.textContent = selecting ? 'Cancel' : 'Select';
+    deleteBtn.style.display = selecting ? '' : 'none';
+    if (!selecting) {
+      document.querySelectorAll('.entry-check').forEach(cb => { cb.checked = false; });
+    }
+    updateDeleteBtn();
+  });
+
+  document.querySelectorAll('.row').forEach(a => {
+    const cb = a.querySelector('.entry-check');
+    a.addEventListener('click', e => {
+      if (!selecting) return;
+      e.preventDefault();
+      // If the click landed directly on the checkbox, the browser already
+      // toggled it before bubbling — don't toggle again.
+      if (e.target !== cb) cb.checked = !cb.checked;
+      updateDeleteBtn();
+    });
+  });
+
+  deleteBtn.addEventListener('click', async () => {
+    const checked = Array.from(document.querySelectorAll('.entry-check:checked'));
+    if (!checked.length) return;
+    const folders = checked.map(cb => cb.closest('.entry').dataset.folder);
+    const n = folders.length;
+    if (!confirm(`Move ${n} transcript${n > 1 ? 's' : ''} to the Recycle Bin?`)) return;
+    const url = await pywebview.api.delete_transcripts(folders);
+    window.location.href = url;
+  });
+}
+if (window.pywebview) {
+  initPywebview();
+} else {
+  window.addEventListener('pywebviewready', initPywebview);
+}
+</script>
+</body>
+</html>
