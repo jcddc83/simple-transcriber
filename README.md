@@ -1,20 +1,22 @@
 # Simple Transcriber for Podcasts & Videos
 
-A small desktop app that turns a podcast or video URL into a speaker-labeled,
-audio-synced HTML transcript you can read, edit, and quote from. Meant to replace the functionality, ease of use, speed and accuracy of Scroll.ai's transcription capabilities.
+**[Scroll.ai](https://www.scroll.ai/) shuts down June 12, 2026.** Simple Transcriber is a free,
+open-source desktop alternative — paste a YouTube link, a podcast URL, or upload a
+local audio/video file and get back a speaker-labeled, audio-synced HTML transcript
+you can read, edit, and quote from.
 
 ![Transcript view](screenshot.png)
 
-Paste a YouTube link or a podcast URL, get back a transcript with:
+You get a transcript with:
 
 - Per-paragraph play buttons synced to the audio
 - Word-level highlighting that follows playback
 - Editable speaker labels and title
 - Inline text editing for fixing mis-transcribed names
 - Paragraph bookmarks collected at the top as "Saved quotes"
-- A browsable library of every transcript you've made
+- A browsable, full-text-searchable library of every transcript you've made
+- Light and dark mode (follows your OS setting)
 
-Built as a personal replacement for [Scroll](https://www.scroll.ai/), which shut down in 2026 and had offered free access for journalists and freelancers.
 Uses [Groq's `whisper-large-v3`](https://console.groq.com) for transcription and
 [AssemblyAI](https://www.assemblyai.com) for speaker diarization.
 
@@ -31,7 +33,8 @@ If you're looking for a more robust but still easy-to-install version and/or a D
    to `config.json` next to the app — nothing leaves your machine except the
    audio you submit for transcription.
 
-That's it. After setup, paste a URL and click **Transcribe**.
+That's it. After setup, paste a URL and click **Transcribe**, or click **Upload file**
+to transcribe a local audio or video file.
 
 ## Getting API keys
 
@@ -60,8 +63,11 @@ A typical 45-minute interview costs well under $0.50 total.
 - **Hints field** — paste proper nouns ("John Doe, ACME Co., NASA")
   before transcribing to help Whisper spell them correctly
 - **URL queue** — paste multiple URLs (one per line) to process in sequence. Press Shift+Enter to start a new line.
+- **Local file upload** — drop in any audio or video file (MP3, M4A, WAV, MP4, MOV,
+  MKV, etc.) instead of a URL; ffmpeg extracts and transcodes audio automatically
 - **Library page** — every transcript, searchable by title, date, or transcript content,
-  sorted by when you transcribed it
+  sorted by when you transcribed it. Use Ctrl+F inside a transcript to jump through matches.
+- **Light and dark mode** — follows your OS preference automatically
 - **Copy and export** — copy a single quote (pre-formatted with attribution and
   timestamp), copy the full transcript, or export as `.txt` / `.md`
 
@@ -116,7 +122,7 @@ themselves, the library — stays on your machine.
 If you'd rather run the Python directly:
 
 ```cmd
-git clone git clone https://github.com/jcddc83/simple-transcriber.git
+git clone https://github.com/jcddc83/simple-transcriber.git
 cd simple-transcriber
 pip install -r requirements.txt
 python transcribe.py
