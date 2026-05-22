@@ -276,6 +276,41 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
     return final_audio, meta
 
 
+def load_local_audio(src: Path, out_dir: Path, status) -> tuple[Path, dict]:
+    """Re-encode a local audio/video file to mono MP3 + return (audio_path, metadata)."""
+    if not src.exists():
+        raise RuntimeError(f"File not found: {src}")
+    status("Reading file...")
+    title = src.stem
+    safe = sanitize_filename(title)
+    project_dir = out_dir / safe
+    project_dir.mkdir(exist_ok=True)
+    final_audio = project_dir / "audio.mp3"
+
+    status("Encoding audio...")
+    subprocess.run(
+        [ffmpeg_exe(), "-y", "-i", str(src),
+         "-vn", "-ar", "16000", "-ac", "1", "-b:a", f"{AUDIO_BITRATE_KBPS}k",
+         str(final_audio)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=_NO_WINDOW,
+    )
+
+    meta = {
+        "title": title,
+        "safe_name": safe,
+        "channel": "",
+        "upload_date_raw": "",
+        "upload_date": "",
+        "url": "",
+        "platform": "local",
+        "duration": 0,
+        "audio_filename": "audio.mp3",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    return final_audio, meta
+
+
 def split_audio_if_needed(audio: Path, status) -> list[tuple[float, Path]]:
     """Return [(offset_seconds, chunk_path)]. Splits with ffmpeg if > 25MB."""
     if audio.stat().st_size <= GROQ_MAX_BYTES:
@@ -576,16 +611,31 @@ class Api:
             target=self._pipeline_queue, args=(urls, hints, cfg), daemon=True
         ).start()
 
-    def _pipeline_queue(self, urls: list[str], hints: str, cfg: dict) -> None:
-        total = len(urls)
+    # Called by the Upload file button in shell.html. path is a local file path.
+    def transcribe_file(self, path: str, hints: str = "") -> None:
+        if not path:
+            self._js("updateStatus('No file selected.')")
+            self._js("onError()")
+            return
+        cfg = load_config()
+        threading.Thread(
+            target=self._pipeline_queue, args=([path], hints, cfg),
+            kwargs={"is_file": True}, daemon=True,
+        ).start()
+
+    def _pipeline_queue(self, sources: list[str], hints: str, cfg: dict,
+                        is_file: bool = False) -> None:
+        total = len(sources)
         last_html: Path | None = None
-        for i, url in enumerate(urls, 1):
+        for i, src in enumerate(sources, 1):
             prefix = f"[{i}/{total}] " if total > 1 else ""
             try:
-                last_html = self._pipeline(url, hints, cfg, status_prefix=prefix)
+                last_html = self._pipeline(src, hints, cfg, status_prefix=prefix,
+                                           is_file=is_file)
             except Exception as e:
+                label = "file" if is_file else "URL"
                 safe = str(e).replace("\\", "\\\\").replace("'", "\\'")
-                self._js(f"updateStatus('Error on URL {i}: {safe}')")
+                self._js(f"updateStatus('Error on {label} {i}: {safe}')")
                 self._js("onError()")
                 return
         if self._window:
@@ -595,12 +645,16 @@ class Api:
             elif last_html is not None:
                 self._window.load_url(last_html.as_uri())
 
-    def _pipeline(self, url: str, hints: str, cfg: dict, status_prefix: str = "") -> Path:
+    def _pipeline(self, src: str, hints: str, cfg: dict, status_prefix: str = "",
+                  is_file: bool = False) -> Path:
         def status(msg: str) -> None:
             safe = (status_prefix + msg).replace("\\", "\\\\").replace("'", "\\'")
             self._js(f"updateStatus('{safe}')")
 
-        audio, meta = download_audio(url, transcripts_dir(), status)
+        if is_file:
+            audio, meta = load_local_audio(Path(src), transcripts_dir(), status)
+        else:
+            audio, meta = download_audio(src, transcripts_dir(), status)
         chunks = split_audio_if_needed(audio, status)
         segments = transcribe_with_groq(cfg["groq_api_key"], chunks, status, hints)
         chunk_dir = audio.parent / "_chunks"

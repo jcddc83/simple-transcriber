@@ -129,9 +129,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     </div>
     <div class="btn-row">
       <button class="primary" id="go">Transcribe</button>
+      <button id="upload-btn">Upload file</button>
       <button id="library">View Library</button>
       <button id="folder">Open Folder</button>
     </div>
+    <input type="file" id="audio-file" accept="audio/*,video/*" style="display:none">
     <p id="status">Ready.</p>
   </section>
 
@@ -198,6 +200,21 @@ urlEl.addEventListener('input', () => {
     urls.length > 1 ? `Transcribe ${urls.length} URLs` : 'Transcribe';
   // Auto-grow up to 6 rows.
   urlEl.rows = Math.min(6, Math.max(1, urlEl.value.split('\n').length));
+});
+
+document.getElementById('upload-btn').addEventListener('click', () => {
+  document.getElementById('audio-file').click();
+});
+
+document.getElementById('audio-file').addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const path = file.path || file.name;
+  const hints = document.getElementById('hints').value.trim();
+  document.getElementById('go').disabled = true;
+  updateStatus('Starting...');
+  pywebview.api.transcribe_file(path, hints);
+  e.target.value = '';  // reset so picking the same file again still fires change
 });
 
 document.getElementById('library').addEventListener('click', async () => {
