@@ -7,6 +7,11 @@ Output/
 config.json
 .venv/
 venv/
+env/
+.env
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
 ffmpeg.exe
 ffprobe.exe
 ffmpeg-temp/
