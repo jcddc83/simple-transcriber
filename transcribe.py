@@ -279,28 +279,58 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
     return final_audio, meta
 
 
-def load_local_audio(src: Path, out_dir: Path, status) -> tuple[Path, dict]:
-    """Re-encode a local audio/video file to mono MP3 + return (audio_path, metadata)."""
+def _unique_project_dir(base: Path, safe_name: str) -> tuple[Path, str]:
+    """Pick base/safe_name, or base/safe_name_2, _3, ... if the prior is non-empty.
+    Returns (project_dir, final_safe_name)."""
+    candidate = base / safe_name
+    if not candidate.exists() or not any(candidate.iterdir()):
+        return candidate, safe_name
+    n = 2
+    while True:
+        name = f"{safe_name}_{n}"
+        candidate = base / name
+        if not candidate.exists() or not any(candidate.iterdir()):
+            return candidate, name
+        n += 1
+
+
+def load_local_audio(src: Path, out_dir: Path, status,
+                     title: str | None = None) -> tuple[Path, dict]:
+    """Re-encode a local audio/video file to mono MP3 + return (audio_path, metadata).
+    title overrides the displayed title (default: src.stem) — used to avoid leaking
+    upload-temp prefixes into the user-visible folder name."""
     if not src.exists():
         raise RuntimeError(f"File not found: {src}")
     status("Reading file...")
-    title = src.stem
-    safe = sanitize_filename(title)
-    project_dir = out_dir / safe
-    project_dir.mkdir(exist_ok=True)
+    display_title = title if title else src.stem
+    safe_base = sanitize_filename(display_title)
+    project_dir, safe = _unique_project_dir(out_dir, safe_base)
+    project_dir.mkdir(parents=True, exist_ok=True)
     final_audio = project_dir / "audio.mp3"
 
     status("Encoding audio...")
-    subprocess.run(
-        [ffmpeg_exe(), "-y", "-i", str(src),
-         "-vn", "-ar", "16000", "-ac", "1", "-b:a", f"{AUDIO_BITRATE_KBPS}k",
-         str(final_audio)],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=_NO_WINDOW,
-    )
+    try:
+        subprocess.run(
+            [ffmpeg_exe(), "-y", "-i", str(src),
+             "-vn", "-ar", "16000", "-ac", "1", "-b:a", f"{AUDIO_BITRATE_KBPS}k",
+             str(final_audio)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
+        )
+    except subprocess.CalledProcessError:
+        # Clean up the empty project dir so we don't leave debris behind.
+        try:
+            if project_dir.exists() and not any(project_dir.iterdir()):
+                project_dir.rmdir()
+        except OSError:
+            pass
+        raise RuntimeError(
+            "Could not read this file as audio. "
+            "Make sure it's a supported audio or video format."
+        )
 
     meta = {
-        "title": title,
+        "title": display_title,
         "safe_name": safe,
         "channel": "",
         "upload_date_raw": "",
@@ -572,7 +602,8 @@ UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024  # JS sends ~4MB raw per chunk (~5.5MB base
 class Api:
     def __init__(self) -> None:
         self._window: webview.Window | None = None
-        self._uploads: dict[str, Path] = {}
+        # upload_id -> (temp file path, original filename supplied by JS)
+        self._uploads: dict[str, tuple[Path, str]] = {}
         self._uploads_lock = threading.Lock()
 
     def set_window(self, w: webview.Window) -> None:
@@ -632,14 +663,15 @@ class Api:
         tmp_path = tmp_dir / f"{upload_id}_{safe_name}"
         tmp_path.write_bytes(b"")
         with self._uploads_lock:
-            self._uploads[upload_id] = tmp_path
+            self._uploads[upload_id] = (tmp_path, safe_name)
         return upload_id
 
     def upload_chunk(self, upload_id: str, b64data: str) -> bool:
         with self._uploads_lock:
-            path = self._uploads.get(upload_id)
-        if path is None:
+            entry = self._uploads.get(upload_id)
+        if entry is None:
             return False
+        path, _ = entry
         try:
             data = base64.b64decode(b64data)
         except Exception:
@@ -650,35 +682,40 @@ class Api:
 
     def upload_finish(self, upload_id: str, hints: str = "") -> None:
         with self._uploads_lock:
-            path = self._uploads.pop(upload_id, None)
-        if path is None:
+            entry = self._uploads.pop(upload_id, None)
+        if entry is None:
             self._js("updateStatus('Unknown upload.')")
             self._js("onError()")
             return
+        path, original_filename = entry
         cfg = load_config()
+        # Use the original filename's stem as the display title so the user
+        # never sees the upload_id prefix from the temp file.
+        title = Path(original_filename).stem or "Uploaded audio"
         threading.Thread(
             target=self._pipeline_queue, args=([str(path)], hints, cfg),
-            kwargs={"is_file": True}, daemon=True,
+            kwargs={"is_file": True, "title": title}, daemon=True,
         ).start()
 
     def upload_cancel(self, upload_id: str) -> None:
         with self._uploads_lock:
-            path = self._uploads.pop(upload_id, None)
-        if path is not None:
+            entry = self._uploads.pop(upload_id, None)
+        if entry is not None:
+            path, _ = entry
             try:
                 path.unlink()
             except OSError:
                 pass
 
     def _pipeline_queue(self, sources: list[str], hints: str, cfg: dict,
-                        is_file: bool = False) -> None:
+                        is_file: bool = False, title: str | None = None) -> None:
         total = len(sources)
         last_html: Path | None = None
         for i, src in enumerate(sources, 1):
             prefix = f"[{i}/{total}] " if total > 1 else ""
             try:
                 last_html = self._pipeline(src, hints, cfg, status_prefix=prefix,
-                                           is_file=is_file)
+                                           is_file=is_file, title=title)
             except Exception as e:
                 label = "file" if is_file else "URL"
                 safe = str(e).replace("\\", "\\\\").replace("'", "\\'")
@@ -693,13 +730,14 @@ class Api:
                 self._window.load_url(last_html.as_uri())
 
     def _pipeline(self, src: str, hints: str, cfg: dict, status_prefix: str = "",
-                  is_file: bool = False) -> Path:
+                  is_file: bool = False, title: str | None = None) -> Path:
         def status(msg: str) -> None:
             safe = (status_prefix + msg).replace("\\", "\\\\").replace("'", "\\'")
             self._js(f"updateStatus('{safe}')")
 
         if is_file:
-            audio, meta = load_local_audio(Path(src), transcripts_dir(), status)
+            audio, meta = load_local_audio(Path(src), transcripts_dir(), status,
+                                           title=title)
         else:
             audio, meta = download_audio(src, transcripts_dir(), status)
         chunks = split_audio_if_needed(audio, status)
@@ -765,8 +803,16 @@ class Api:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _wipe_orphan_uploads() -> None:
+    """Remove any leftover upload staging files from prior runs."""
+    tmp_dir = Path(tempfile.gettempdir()) / "simple-transcriber-uploads"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def main() -> None:
     migrate_to_folders()
+    _wipe_orphan_uploads()
     api = Api()
     shell_url = (resource_dir() / "templates" / "shell.html").as_uri()
     cfg = load_config()

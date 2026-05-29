@@ -171,11 +171,22 @@ document.getElementById('save-keys').addEventListener('click', async () => {
   document.getElementById('main').style.display = '';
 });
 
+// Mutual exclusion: a URL transcription and a local file upload can't run
+// at the same time — they'd race on the window-navigation in _pipeline_queue.
+let pipelineBusy = false;
+
+function setBusy(busy) {
+  pipelineBusy = busy;
+  document.getElementById('go').disabled = busy;
+  document.getElementById('upload-btn').disabled = busy;
+}
+
 document.getElementById('go').addEventListener('click', () => {
+  if (pipelineBusy) return;
   const url = document.getElementById('url').value.trim();
   if (!url) { updateStatus('Paste a URL first.'); return; }
   const hints = document.getElementById('hints').value.trim();
-  document.getElementById('go').disabled = true;
+  setBusy(true);
   updateStatus('Starting...');
   pywebview.api.transcribe(url, hints);
 });
@@ -203,6 +214,7 @@ urlEl.addEventListener('input', () => {
 });
 
 document.getElementById('upload-btn').addEventListener('click', () => {
+  if (pipelineBusy) return;
   document.getElementById('audio-file').click();
 });
 
@@ -219,8 +231,9 @@ document.getElementById('audio-file').addEventListener('change', async (e) => {
   const file = e.target.files && e.target.files[0];
   e.target.value = '';  // reset so picking the same file again still fires change
   if (!file) return;
+  if (pipelineBusy) return;
   const hints = document.getElementById('hints').value.trim();
-  document.getElementById('go').disabled = true;
+  setBusy(true);
   updateStatus('Uploading 0%...');
 
   const CHUNK = 4 * 1024 * 1024;  // 4MB raw per chunk
@@ -266,8 +279,7 @@ function updateStatus(msg) {
 }
 
 function onError() {
-  const btn = document.getElementById('go');
-  if (btn) btn.disabled = false;
+  setBusy(false);
 }
 </script>
 </body>

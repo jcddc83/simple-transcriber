@@ -569,6 +569,7 @@ function wireParagraph(p) {
   }
   const bm = p.querySelector('.bookmark');
   if (bm) {
+    if (p.classList.contains('bookmarked')) bm.textContent = '★';
     bm.addEventListener('click', e => {
       e.stopPropagation();
       const now = !p.classList.contains('bookmarked');
@@ -666,8 +667,10 @@ document.addEventListener('click', (e) => {
   if (!para) return;
   const sourceText = para.querySelector('.text');
   if (!sourceText || word.parentNode !== sourceText) return;
-  // First word: nothing to split.
-  if (word === sourceText.querySelector('.word')) {
+  const allWords = sourceText.querySelectorAll('.word');
+  // First word: nothing to split (would leave an empty paragraph above).
+  // Last word: would leave the original paragraph empty.
+  if (word === allWords[0] || word === allWords[allWords.length - 1]) {
     e.preventDefault();
     return;
   }
