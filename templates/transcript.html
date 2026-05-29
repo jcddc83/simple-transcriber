@@ -51,7 +51,7 @@
         <button class="bookmark" title="Bookmark this paragraph">☆</button>
         <button class="copy-quote" title="Copy quote with speaker and timestamp">⎘</button>
       </div>
-      <p class="text" contenteditable="true" spellcheck="false">{% if p.words %}{% for w in p.words %}<span class="word" data-start="{{ '%.3f'|format(w.start) }}">{{ w.word }}</span> {% endfor %}{% else %}{{ p.text }}{% endif %}</p>
+      <p class="text" contenteditable="true" spellcheck="false" title="Shift+click a word to split this paragraph at that word.">{% if p.words %}{% for w in p.words %}<span class="word" data-start="{{ '%.3f'|format(w.start) }}">{{ w.word }}</span> {% endfor %}{% else %}{{ p.text }}{% endif %}</p>
     </article>
     {% endfor %}
   </section>
@@ -86,7 +86,7 @@ const seek = document.getElementById('seek');
 const cur = document.getElementById('cur');
 const dur = document.getElementById('dur');
 const speed = document.getElementById('speed');
-const paragraphs = Array.from(document.querySelectorAll('.paragraph'));
+let paragraphs = Array.from(document.querySelectorAll('.paragraph'));
 const wordSpans = Array.from(document.querySelectorAll('.word[data-start]'));
 let activeWordEl = null;
 
@@ -511,6 +511,169 @@ function fallbackDownload(blob, filename) {
   a.download = filename || decodeURIComponent(location.pathname.split('/').pop()) || 'transcript.html';
   a.click();
 }
+
+// ---------------------------------------------------------------------
+// Split a paragraph when one mis-attributes two speakers.
+// Shift+click any word: that word becomes the first word of a new
+// paragraph below, labeled "Speaker ?" until the user renames it.
+// Bookmarks propagate to both halves.
+// ---------------------------------------------------------------------
+
+function uniqueParaId(base) {
+  if (!document.getElementById(base)) return base;
+  let n = 2;
+  while (document.getElementById(`${base}_${n}`)) n++;
+  return `${base}_${n}`;
+}
+
+// Mirrors the per-element bindings declared earlier (play / text keydown
+// / copy-quote / speaker rename / bookmark) so a freshly cloned paragraph
+// behaves identically to one rendered at page load.
+function wireParagraph(p) {
+  const play = p.querySelector('.play');
+  if (play) play.addEventListener('click', () => {
+    audio.currentTime = parseFloat(p.dataset.start);
+    audio.play();
+    reengageFollow();
+  });
+  const text = p.querySelector('.text');
+  if (text) text.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); text.blur(); }
+  });
+  const cq = p.querySelector('.copy-quote');
+  if (cq) cq.addEventListener('click', async () => {
+    const txt = p.querySelector('.text').textContent.trim();
+    const spk = p.querySelector('.speaker').textContent.trim();
+    const ts  = p.querySelector('.ts').textContent.trim();
+    try {
+      await navigator.clipboard.writeText(`"${txt}" — ${spk} [${ts}]`);
+      const orig = cq.textContent;
+      cq.textContent = '✓';
+      setTimeout(() => { cq.textContent = orig; }, 1200);
+    } catch (_) {}
+  });
+  const sp = p.querySelector('.speaker');
+  if (sp) {
+    sp.style.cursor = 'pointer';
+    sp.addEventListener('click', () => {
+      const oldName = sp.textContent.trim();
+      const newName = prompt('Rename this label:', oldName);
+      if (!newName || !newName.trim() || newName.trim() === oldName) return;
+      sp.textContent = newName.trim();
+      if (confirm(`Also rename all other "${oldName}" labels?`)) {
+        document.querySelectorAll('.speaker').forEach(s => {
+          if (s.textContent.trim() === oldName) s.textContent = newName.trim();
+        });
+      }
+    });
+  }
+  const bm = p.querySelector('.bookmark');
+  if (bm) {
+    bm.addEventListener('click', e => {
+      e.stopPropagation();
+      const now = !p.classList.contains('bookmarked');
+      p.classList.toggle('bookmarked', now);
+      bm.textContent = now ? '★' : '☆';
+      syncSavedQuotes();
+    });
+  }
+}
+
+function splitParagraphAt(para, word) {
+  const ts = parseFloat(word.dataset.start);
+  if (!isFinite(ts)) return;
+  const sourceText = para.querySelector('.text');
+  if (!sourceText || word.parentNode !== sourceText) return;
+
+  const clone = document.createElement('article');
+  clone.className = 'paragraph';
+  clone.dataset.start = ts.toFixed(3);
+  clone.id = uniqueParaId(`para-${ts.toFixed(3)}`);
+  if (para.classList.contains('bookmarked')) clone.classList.add('bookmarked');
+
+  const play = document.createElement('button');
+  play.className = 'play';
+  play.title = 'Play paragraph';
+  play.setAttribute('aria-label', 'Play paragraph');
+  play.textContent = '▶';
+  clone.appendChild(play);
+
+  const head = document.createElement('div');
+  head.className = 'head';
+  const origSpeaker = para.querySelector('.speaker');
+  const spk = document.createElement('span');
+  spk.className = 'speaker';
+  spk.dataset.original = origSpeaker ? (origSpeaker.dataset.original || '') : '';
+  spk.title = 'Click to rename this speaker';
+  spk.textContent = 'Speaker ?';
+  head.appendChild(spk);
+  const tsEl = document.createElement('span');
+  tsEl.className = 'ts';
+  tsEl.textContent = fmt(ts);
+  head.appendChild(tsEl);
+  const bm = document.createElement('button');
+  bm.className = 'bookmark';
+  bm.title = 'Bookmark this paragraph';
+  bm.textContent = para.classList.contains('bookmarked') ? '★' : '☆';
+  head.appendChild(bm);
+  const cq = document.createElement('button');
+  cq.className = 'copy-quote';
+  cq.title = 'Copy quote with speaker and timestamp';
+  cq.textContent = '⎘';
+  head.appendChild(cq);
+  clone.appendChild(head);
+
+  const newText = document.createElement('p');
+  newText.className = 'text';
+  newText.setAttribute('contenteditable', 'true');
+  newText.setAttribute('spellcheck', 'false');
+  newText.setAttribute('title', 'Shift+click a word to split this paragraph at that word.');
+
+  // Move the clicked word and every sibling that follows it (words plus
+  // the whitespace text nodes between them) into the new .text.
+  let n = word;
+  while (n) {
+    const next = n.nextSibling;
+    newText.appendChild(n);
+    n = next;
+  }
+  // Trim leading whitespace text nodes on the new half.
+  while (newText.firstChild
+         && newText.firstChild.nodeType === Node.TEXT_NODE
+         && !newText.firstChild.textContent.trim()) {
+    newText.removeChild(newText.firstChild);
+  }
+  // Trim trailing whitespace text nodes on the original half.
+  while (sourceText.lastChild
+         && sourceText.lastChild.nodeType === Node.TEXT_NODE
+         && !sourceText.lastChild.textContent.trim()) {
+    sourceText.removeChild(sourceText.lastChild);
+  }
+
+  clone.appendChild(newText);
+  para.parentNode.insertBefore(clone, para.nextSibling);
+
+  wireParagraph(clone);
+  paragraphs = Array.from(document.querySelectorAll('.paragraph'));
+  syncSavedQuotes();
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.shiftKey) return;
+  const word = e.target.closest && e.target.closest('.word');
+  if (!word) return;
+  const para = word.closest('.paragraph');
+  if (!para) return;
+  const sourceText = para.querySelector('.text');
+  if (!sourceText || word.parentNode !== sourceText) return;
+  // First word: nothing to split.
+  if (word === sourceText.querySelector('.word')) {
+    e.preventDefault();
+    return;
+  }
+  e.preventDefault();
+  splitParagraphAt(para, word);
+});
 </script>
 </body>
 </html>
