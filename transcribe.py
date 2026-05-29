@@ -226,6 +226,7 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
         "outtmpl": tmpl,
         "quiet": True,
         "no_warnings": True,
+        "noplaylist": True,
         "ffmpeg_location": _ffmpeg_location(),
         "postprocessors": [
             {
