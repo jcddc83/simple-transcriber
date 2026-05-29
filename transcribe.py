@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -565,9 +566,14 @@ def migrate_to_folders() -> None:
 # pywebview API (called from JavaScript via window.pywebview.api.*)
 # ---------------------------------------------------------------------------
 
+UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024  # JS sends ~4MB raw per chunk (~5.5MB base64)
+
+
 class Api:
     def __init__(self) -> None:
         self._window: webview.Window | None = None
+        self._uploads: dict[str, Path] = {}
+        self._uploads_lock = threading.Lock()
 
     def set_window(self, w: webview.Window) -> None:
         self._window = w
@@ -613,30 +619,56 @@ class Api:
             target=self._pipeline_queue, args=(urls, hints, cfg), daemon=True
         ).start()
 
-    # Called by the Upload file flow in shell.html. WebView2 doesn't expose
-    # the disk path of files picked via <input type="file">, so JS sends the
-    # file bytes as base64 and we stage them to a temp file before transcoding.
-    def transcribe_file_data(self, filename: str, b64data: str, hints: str = "") -> None:
-        if not b64data:
-            self._js("updateStatus('No file data.')")
-            self._js("onError()")
-            return
-        try:
-            data = base64.b64decode(b64data)
-        except Exception as e:
-            safe = str(e).replace("\\", "\\\\").replace("'", "\\'")
-            self._js(f"updateStatus('Decode error: {safe}')")
-            self._js("onError()")
-            return
+    # Chunked upload flow used by the Upload file button in shell.html.
+    # WebView2 doesn't expose disk paths of files picked via <input type="file">,
+    # and base64-encoding a multi-GB file into one bridge call would balloon
+    # memory. JS slices the file, sends ~4MB chunks, and we append each chunk
+    # straight to disk so peak RAM stays bounded.
+    def upload_begin(self, filename: str) -> str:
+        upload_id = uuid.uuid4().hex
         tmp_dir = Path(tempfile.gettempdir()) / "simple-transcriber-uploads"
         tmp_dir.mkdir(exist_ok=True)
-        tmp_path = tmp_dir / (filename or "upload.bin")
-        tmp_path.write_bytes(data)
+        safe_name = Path(filename or "upload.bin").name  # strip any path components
+        tmp_path = tmp_dir / f"{upload_id}_{safe_name}"
+        tmp_path.write_bytes(b"")
+        with self._uploads_lock:
+            self._uploads[upload_id] = tmp_path
+        return upload_id
+
+    def upload_chunk(self, upload_id: str, b64data: str) -> bool:
+        with self._uploads_lock:
+            path = self._uploads.get(upload_id)
+        if path is None:
+            return False
+        try:
+            data = base64.b64decode(b64data)
+        except Exception:
+            return False
+        with open(path, "ab") as f:
+            f.write(data)
+        return True
+
+    def upload_finish(self, upload_id: str, hints: str = "") -> None:
+        with self._uploads_lock:
+            path = self._uploads.pop(upload_id, None)
+        if path is None:
+            self._js("updateStatus('Unknown upload.')")
+            self._js("onError()")
+            return
         cfg = load_config()
         threading.Thread(
-            target=self._pipeline_queue, args=([str(tmp_path)], hints, cfg),
+            target=self._pipeline_queue, args=([str(path)], hints, cfg),
             kwargs={"is_file": True}, daemon=True,
         ).start()
+
+    def upload_cancel(self, upload_id: str) -> None:
+        with self._uploads_lock:
+            path = self._uploads.pop(upload_id, None)
+        if path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     def _pipeline_queue(self, sources: list[str], hints: str, cfg: dict,
                         is_file: bool = False) -> None:
