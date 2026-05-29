@@ -58,6 +58,8 @@ A typical 45-minute interview costs well under $0.50 total.
 - **Editable speakers** — click a label to rename ("Speaker A" → "Jane Smith");
   choose to rename just one occurrence or all matching labels
 - **Editable text and title** — click any paragraph or the title to fix typos
+- **Split paragraphs** — shift+click any word to break a paragraph at that word,
+  useful when the diarizer fuses two speakers into one block
 - **Bookmarks** — star paragraphs worth quoting; they appear in a "Saved quotes"
   section at the top with jump links
 - **Hints field** — paste proper nouns ("John Doe, ACME Co., NASA")
