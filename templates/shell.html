@@ -209,11 +209,20 @@ document.getElementById('upload-btn').addEventListener('click', () => {
 document.getElementById('audio-file').addEventListener('change', (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
-  const path = file.path || file.name;
   const hints = document.getElementById('hints').value.trim();
   document.getElementById('go').disabled = true;
-  updateStatus('Starting...');
-  pywebview.api.transcribe_file(path, hints);
+  updateStatus('Reading file...');
+  const reader = new FileReader();
+  reader.onload = () => {
+    // result is a data URL: "data:audio/mpeg;base64,XXXX" — take what follows the comma.
+    const b64 = String(reader.result).split(',', 2)[1] || '';
+    pywebview.api.transcribe_file_data(file.name, b64, hints);
+  };
+  reader.onerror = () => {
+    updateStatus('Error reading file: ' + (reader.error && reader.error.message || reader.error));
+    onError();
+  };
+  reader.readAsDataURL(file);
   e.target.value = '';  // reset so picking the same file again still fires change
 });
 

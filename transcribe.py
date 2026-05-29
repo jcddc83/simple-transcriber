@@ -12,12 +12,14 @@ Pipeline:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -611,15 +613,28 @@ class Api:
             target=self._pipeline_queue, args=(urls, hints, cfg), daemon=True
         ).start()
 
-    # Called by the Upload file button in shell.html. path is a local file path.
-    def transcribe_file(self, path: str, hints: str = "") -> None:
-        if not path:
-            self._js("updateStatus('No file selected.')")
+    # Called by the Upload file flow in shell.html. WebView2 doesn't expose
+    # the disk path of files picked via <input type="file">, so JS sends the
+    # file bytes as base64 and we stage them to a temp file before transcoding.
+    def transcribe_file_data(self, filename: str, b64data: str, hints: str = "") -> None:
+        if not b64data:
+            self._js("updateStatus('No file data.')")
             self._js("onError()")
             return
+        try:
+            data = base64.b64decode(b64data)
+        except Exception as e:
+            safe = str(e).replace("\\", "\\\\").replace("'", "\\'")
+            self._js(f"updateStatus('Decode error: {safe}')")
+            self._js("onError()")
+            return
+        tmp_dir = Path(tempfile.gettempdir()) / "simple-transcriber-uploads"
+        tmp_dir.mkdir(exist_ok=True)
+        tmp_path = tmp_dir / (filename or "upload.bin")
+        tmp_path.write_bytes(data)
         cfg = load_config()
         threading.Thread(
-            target=self._pipeline_queue, args=([path], hints, cfg),
+            target=self._pipeline_queue, args=([str(tmp_path)], hints, cfg),
             kwargs={"is_file": True}, daemon=True,
         ).start()
 
