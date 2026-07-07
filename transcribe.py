@@ -420,7 +420,7 @@ def diarize_with_assemblyai(api_key: str, audio: Path, status) -> list[tuple[flo
     aai.settings.api_key = api_key
     config = aai.TranscriptionConfig(
         speaker_labels=True,
-        speech_models=["universal-3-pro", "universal-2"],
+        speech_models=["universal-3-5-pro"],
     )
     transcript = aai.Transcriber().transcribe(str(audio), config=config)
     if transcript.status == aai.TranscriptStatus.error:
