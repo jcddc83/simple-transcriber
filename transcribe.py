@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -46,6 +47,65 @@ CHUNK_MINUTES = 20  # used only if encoded audio still exceeds GROQ_MAX_BYTES
 PARA_PAUSE_SECONDS = 1.75  # a pause this long between segments starts a new paragraph
 PARA_SOFT_CHARS = 550  # past this, break at the next sentence-ending segment
 PARA_HARD_CHARS = 900  # past this, break at the next segment boundary regardless
+
+# Stage weights for the transcription progress bar, normalized per run over
+# the stages that actually apply (local files skip "download").
+PROGRESS_STAGES = {
+    "download": 0.15,
+    "encode": 0.10,
+    "transcribe": 0.30,
+    "diarize": 0.40,
+    "render": 0.05,
+}
+GROQ_REALTIME_RATIO = 0.03  # Groq whisper-large-v3 ≈ 3% of realtime (tunable)
+AAI_REALTIME_RATIO = 0.25  # AssemblyAI diarization ≈ 25% of realtime (tunable)
+
+
+class _Progress:
+    """Weighted multi-stage progress feeding the shell's bar.
+
+    Stages are declared up front so weights normalize to 100% even when a
+    stage doesn't apply. Fractions passed with estimated=True come from
+    elapsed-time guesses (Groq intra-chunk, AssemblyAI fill) and render
+    with a pulsing style and "~" label; everything else is driven by real
+    signals (yt-dlp bytes, ffmpeg out_time, chunk boundaries, AssemblyAI
+    status transitions).
+    """
+
+    def __init__(self, emit, stages: list[str]) -> None:
+        total = sum(PROGRESS_STAGES.get(s, 0.0) for s in stages) or 1.0
+        self._weights = {s: PROGRESS_STAGES.get(s, 0.0) / total for s in stages}
+        self._emit = emit
+        self._done = 0.0  # weight of completed stages
+        self._weight = 0.0  # weight of the active stage
+        self._frac = 0.0  # progress within the active stage
+
+    def stage(self, name: str) -> None:
+        self._done += self._weight
+        self._weight = self._weights.get(name, 0.0)
+        self._frac = 0.0
+        self._send(False)
+
+    def update(self, fraction: float, estimated: bool = False) -> None:
+        self._frac = max(0.0, min(1.0, fraction))
+        self._send(estimated)
+
+    def finish(self) -> None:
+        self._done, self._weight, self._frac = 1.0, 0.0, 0.0
+        self._send(False)
+
+    def _send(self, estimated: bool) -> None:
+        overall = round((self._done + self._weight * self._frac) * 100)
+        self._emit({"overall": overall, "estimated": estimated})
+
+
+class _NullProgress:
+    def stage(self, name: str) -> None: ...
+    def update(self, fraction: float, estimated: bool = False) -> None: ...
+    def finish(self) -> None: ...
+
+
+_NULL_PROGRESS = _NullProgress()
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +283,66 @@ def _ffmpeg_location() -> str | None:
     return str(d) if (d / exe).exists() else None
 
 
-def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
+def _run_ffmpeg(args: list[str], duration: float | None = None,
+                on_progress=None) -> None:
+    """Run ffmpeg. With duration + on_progress, parse `-progress` output and
+    report the fraction of the input processed. Captures stderr either way
+    so a failure surfaces ffmpeg's actual error instead of a silent code."""
+    cmd = [ffmpeg_exe(), "-y"]
+    track = bool(on_progress and duration)
+    if track:
+        cmd += ["-progress", "pipe:1", "-nostats", "-loglevel", "error"]
+    cmd += args
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE if track else subprocess.DEVNULL,
+        stderr=subprocess.PIPE, text=True, creationflags=_NO_WINDOW,
+    )
+    if track:
+        for line in proc.stdout:
+            # ffmpeg quirk: out_time_ms is microseconds, not milliseconds.
+            if line.startswith("out_time_ms="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    on_progress(min(1.0, us / 1_000_000 / duration))
+                except ValueError:
+                    pass
+    stderr = proc.communicate()[1] or ""
+    if proc.returncode != 0:
+        tail = stderr.strip().splitlines()
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd, stderr=tail[-1] if tail else ""
+        )
+
+
+def _media_duration(path: Path) -> float | None:
+    """Duration in seconds read from ffmpeg's header dump (no decode)."""
+    try:
+        proc = subprocess.run(
+            [ffmpeg_exe(), "-i", str(path)], capture_output=True, text=True,
+            creationflags=_NO_WINDOW,
+        )
+        m = re.search(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)", proc.stderr)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except OSError:
+        pass
+    return None
+
+
+def download_audio(url: str, out_dir: Path, status,
+                   progress=_NULL_PROGRESS) -> tuple[Path, dict]:
     """Download mono MP3 + return (audio_path, metadata dict)."""
     status("Downloading audio...")
+    progress.stage("download")
+
+    def _hook(d: dict) -> None:
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            if total:
+                progress.update(d.get("downloaded_bytes", 0) / total)
+        elif d.get("status") == "finished":
+            progress.update(1.0)
+
     tmpl = str(out_dir / "_tmp_%(id)s.%(ext)s")
     opts = {
         "format": "bestaudio/best",
@@ -234,6 +351,7 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
         "no_warnings": True,
         "noplaylist": True,
         "ffmpeg_location": _ffmpeg_location(),
+        "progress_hooks": [_hook],
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -262,12 +380,13 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
     tmp_path.replace(final_audio)
 
     status("Encoding audio...")
+    progress.stage("encode")
     reenc = final_audio.with_suffix(".enc.mp3")
-    subprocess.run(
-        [ffmpeg_exe(), "-y", "-i", str(final_audio),
+    _run_ffmpeg(
+        ["-i", str(final_audio),
          "-ar", "16000", "-ac", "1", "-b:a", "32k", str(reenc)],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=_NO_WINDOW,
+        duration=info.get("duration") or None,
+        on_progress=progress.update,
     )
     reenc.replace(final_audio)
 
@@ -302,7 +421,8 @@ def _unique_project_dir(base: Path, safe_name: str) -> tuple[Path, str]:
 
 
 def load_local_audio(src: Path, out_dir: Path, status,
-                     title: str | None = None) -> tuple[Path, dict]:
+                     title: str | None = None,
+                     progress=_NULL_PROGRESS) -> tuple[Path, dict]:
     """Re-encode a local audio/video file to mono MP3 + return (audio_path, metadata).
     title overrides the displayed title (default: src.stem) — used to avoid leaking
     upload-temp prefixes into the user-visible folder name."""
@@ -314,15 +434,17 @@ def load_local_audio(src: Path, out_dir: Path, status,
     project_dir, safe = _unique_project_dir(out_dir, safe_base)
     project_dir.mkdir(parents=True, exist_ok=True)
     final_audio = project_dir / "audio.mp3"
+    duration = _media_duration(src)
 
     status("Encoding audio...")
+    progress.stage("encode")
     try:
-        subprocess.run(
-            [ffmpeg_exe(), "-y", "-i", str(src),
+        _run_ffmpeg(
+            ["-i", str(src),
              "-vn", "-ar", "16000", "-ac", "1", "-b:a", f"{AUDIO_BITRATE_KBPS}k",
              str(final_audio)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=_NO_WINDOW,
+            duration=duration,
+            on_progress=progress.update,
         )
     except subprocess.CalledProcessError:
         # Clean up the empty project dir so we don't leave debris behind.
@@ -344,7 +466,7 @@ def load_local_audio(src: Path, out_dir: Path, status,
         "upload_date": "",
         "url": "",
         "platform": "local",
-        "duration": 0,
+        "duration": round(duration) if duration else 0,
         "audio_filename": "audio.mp3",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -360,36 +482,58 @@ def split_audio_if_needed(audio: Path, status) -> list[tuple[float, Path]]:
     chunk_dir.mkdir(exist_ok=True)
     seg_seconds = CHUNK_MINUTES * 60
     pattern = chunk_dir / "chunk_%03d.mp3"
-    subprocess.run(
+    _run_ffmpeg(
         [
-            ffmpeg_exe(), "-y", "-i", str(audio),
+            "-i", str(audio),
             "-f", "segment", "-segment_time", str(seg_seconds),
             "-ar", "16000", "-ac", "1", "-b:a", "32k", str(pattern),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_NO_WINDOW,
+        ]
     )
     chunks = sorted(chunk_dir.glob("chunk_*.mp3"))
     return [(i * seg_seconds, p) for i, p in enumerate(chunks)]
 
 
-def transcribe_with_groq(api_key: str, chunks: list[tuple[float, Path]], status, hints: str = "") -> list[Segment]:
+def transcribe_with_groq(api_key: str, chunks: list[tuple[float, Path]], status, hints: str = "",
+                         progress=_NULL_PROGRESS, total_seconds: float = 0.0) -> list[Segment]:
     status("Transcribing with Groq...")
+    progress.stage("transcribe")
     client = Groq(api_key=api_key)
     segments: list[Segment] = []
-    for offset, chunk in chunks:
-        with chunk.open("rb") as f:
-            kwargs = dict(
-                file=(chunk.name, f.read()),
-                model=GROQ_MODEL,
-                response_format="verbose_json",
-                timestamp_granularities=["segment", "word"],
-            )
-            if hints:
-                kwargs["prompt"] = hints
-            resp = client.audio.transcriptions.create(**kwargs)
+    for i, (offset, chunk) in enumerate(chunks):
+        # Chunk boundaries are real progress; the fill inside one chunk is
+        # an elapsed-time estimate (the API call is a single blocking POST).
+        if total_seconds > 0:
+            next_offset = chunks[i + 1][0] if i + 1 < len(chunks) else total_seconds
+            base = offset / total_seconds
+            span = max(0.0, (next_offset - offset) / total_seconds)
+            chunk_seconds = next_offset - offset
+        else:
+            base, span = i / len(chunks), 1 / len(chunks)
+            chunk_seconds = 0.0
+        expected = max(3.0, chunk_seconds * GROQ_REALTIME_RATIO) if chunk_seconds else 10.0
+        ticker_stop = threading.Event()
+
+        def _tick(base=base, span=span, expected=expected, stop=ticker_stop):
+            t0 = time.monotonic()
+            while not stop.wait(0.5):
+                frac = min(0.95, (time.monotonic() - t0) / expected)
+                progress.update(base + span * frac, estimated=True)
+
+        threading.Thread(target=_tick, daemon=True).start()
+        try:
+            with chunk.open("rb") as f:
+                kwargs = dict(
+                    file=(chunk.name, f.read()),
+                    model=GROQ_MODEL,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment", "word"],
+                )
+                if hints:
+                    kwargs["prompt"] = hints
+                resp = client.audio.transcriptions.create(**kwargs)
+        finally:
+            ticker_stop.set()
+        progress.update(base + span)
         def _get(obj, key, default=None):
             return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
@@ -420,16 +564,34 @@ def transcribe_with_groq(api_key: str, chunks: list[tuple[float, Path]], status,
     return segments
 
 
-def diarize_with_assemblyai(api_key: str, audio: Path, status) -> list[tuple[float, float, str]]:
+def diarize_with_assemblyai(api_key: str, audio: Path, status,
+                            progress=_NULL_PROGRESS,
+                            duration: float = 0.0) -> list[tuple[float, float, str]]:
     """Returns list of (start_sec, end_sec, speaker_label)."""
     status("Identifying speakers with AssemblyAI...")
+    progress.stage("diarize")
     aai.settings.api_key = api_key
     config = aai.TranscriptionConfig(
         speaker_labels=True,
     )
-    transcript = aai.Transcriber().transcribe(str(audio), config=config)
+    # submit + poll instead of the SDK's blocking transcribe() so the bar
+    # can move: queued/processing/completed transitions are real; the fill
+    # while processing is an elapsed-time estimate against the audio length.
+    transcript = aai.Transcriber().submit(str(audio), config=config)
+    expected = max(20.0, duration * AAI_REALTIME_RATIO) if duration else 60.0
+    t0 = time.monotonic()
+    while transcript.status not in (
+        aai.TranscriptStatus.completed, aai.TranscriptStatus.error
+    ):
+        frac = min(0.95, (time.monotonic() - t0) / expected)
+        if transcript.status == aai.TranscriptStatus.queued:
+            frac = min(frac, 0.05)
+        progress.update(frac, estimated=True)
+        time.sleep(3)
+        transcript = aai.Transcript.get_by_id(transcript.id)
     if transcript.status == aai.TranscriptStatus.error:
         raise RuntimeError(f"AssemblyAI error: {transcript.error}")
+    progress.update(1.0)
     out: list[tuple[float, float, str]] = []
     for utt in (transcript.utterances or []):
         out.append((utt.start / 1000.0, utt.end / 1000.0, f"Speaker {utt.speaker}"))
@@ -795,22 +957,34 @@ class Api:
             safe = (status_prefix + msg).replace("\\", "\\\\").replace("'", "\\'")
             self._js(f"updateStatus('{safe}')")
 
+        def emit(payload: dict) -> None:
+            self._js(f"updateProgress({json.dumps(payload)})")
+
+        stages = ["encode"] if is_file else ["download", "encode"]
+        progress = _Progress(emit, stages + ["transcribe", "diarize", "render"])
+
         if is_file:
             audio, meta = load_local_audio(Path(src), transcripts_dir(), status,
-                                           title=title)
+                                           title=title, progress=progress)
         else:
-            audio, meta = download_audio(src, transcripts_dir(), status)
+            audio, meta = download_audio(src, transcripts_dir(), status,
+                                         progress=progress)
         chunks = split_audio_if_needed(audio, status)
-        segments = transcribe_with_groq(cfg["groq_api_key"], chunks, status, hints)
+        duration = float(meta.get("duration") or 0)
+        segments = transcribe_with_groq(cfg["groq_api_key"], chunks, status, hints,
+                                        progress=progress, total_seconds=duration)
         chunk_dir = audio.parent / "_chunks"
         if chunk_dir.exists():
             shutil.rmtree(chunk_dir, ignore_errors=True)
-        diar = diarize_with_assemblyai(cfg["assemblyai_api_key"], audio, status)
+        diar = diarize_with_assemblyai(cfg["assemblyai_api_key"], audio, status,
+                                       progress=progress, duration=duration)
         align_speakers(segments, diar)
+        progress.stage("render")
         paragraphs = group_segments_by_speaker(segments)
         html_path = render_transcript(meta, paragraphs, segments=segments,
                                       diarization=diar)
         rebuild_library()
+        progress.finish()
         status("Done!")
         return html_path
 

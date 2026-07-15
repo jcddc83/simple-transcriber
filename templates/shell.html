@@ -64,6 +64,24 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   min-height: 20px;
 }
 #status.error { color: #dc2626; }
+#progress-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+#progress-row[hidden] { display: none; }
+#progress {
+  flex: 1; height: 8px; border-radius: 4px;
+  background: var(--hover); overflow: hidden;
+}
+#progress-fill {
+  height: 100%; width: 0%; border-radius: 4px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+/* Estimated fill (elapsed-time guess, not a real signal): pulse + "~" pct */
+#progress-fill.estimated { animation: progress-pulse 1.6s ease-in-out infinite; }
+@keyframes progress-pulse { 50% { opacity: 0.55; } }
+#progress-pct {
+  font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums; min-width: 40px; text-align: right;
+}
 .divider { height: 1px; background: var(--border); margin: 24px 0; }
 .setup-note { font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
 .setup-note a { color: var(--accent); }
@@ -134,6 +152,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
       <button id="folder">Open Folder</button>
     </div>
     <input type="file" id="audio-file" accept="audio/*,video/*" style="display:none">
+    <div id="progress-row" hidden>
+      <div id="progress"><div id="progress-fill"></div></div>
+      <span id="progress-pct"></span>
+    </div>
     <p id="status">Ready.</p>
   </section>
 
@@ -278,8 +300,32 @@ function updateStatus(msg) {
   }
 }
 
+// Called from Python with {overall: 0-100, estimated: bool}. Estimated
+// portions (Groq intra-chunk, AssemblyAI fill) pulse and show "~NN%";
+// real signals (download bytes, encode time, chunk boundaries) don't.
+function updateProgress(p) {
+  const row = document.getElementById('progress-row');
+  if (!row) return;
+  const fill = document.getElementById('progress-fill');
+  const pct = document.getElementById('progress-pct');
+  const v = Math.max(0, Math.min(100, Math.round(p.overall || 0)));
+  row.hidden = false;
+  fill.style.width = v + '%';
+  fill.classList.toggle('estimated', !!p.estimated);
+  pct.textContent = (p.estimated ? '~' : '') + v + '%';
+}
+
+function hideProgress() {
+  const row = document.getElementById('progress-row');
+  if (!row) return;
+  row.hidden = true;
+  document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('progress-pct').textContent = '';
+}
+
 function onError() {
   setBusy(false);
+  hideProgress();
 }
 </script>
 </body>
