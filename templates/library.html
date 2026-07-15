@@ -37,6 +37,7 @@
         </span>
         <span class="title">{{ e.title }}</span>
         <span class="date">{{ e.upload_date }}</span>
+        {% if '/' in e.href %}<button class="rename-btn" title="Rename transcript" style="display:none">✎</button>{% endif %}
       </a>
     </li>
     {% endfor %}
@@ -81,6 +82,22 @@ function initPywebview() {
   const deleteBtn = document.getElementById('delete-btn');
   const entriesList = document.querySelector('.entries');
   if (!entriesList) return;  // no entries, nothing to delete
+
+  // Rename (pywebview only — needs the Python bridge to update metadata).
+  // Hidden for legacy flat-layout entries, which have no folder to target.
+  document.querySelectorAll('.rename-btn').forEach(btn => {
+    btn.style.display = '';
+    btn.addEventListener('click', async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const li = btn.closest('.entry');
+      const cur = li.querySelector('.title').textContent.trim();
+      const t = prompt('Rename transcript:', cur);
+      if (!t || !t.trim() || t.trim() === cur) return;
+      const url = await pywebview.api.rename_transcript(li.dataset.folder, t.trim());
+      window.location.href = url;
+    });
+  });
 
   selectBtn.style.display = '';
   let selecting = false;

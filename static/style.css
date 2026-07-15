@@ -384,14 +384,14 @@ body {
 
 .row {
   display: grid;
-  grid-template-columns: 32px 1fr auto;
+  grid-template-columns: 32px 1fr auto auto;
   align-items: center;
   gap: 14px;
   padding: 14px 8px;
   text-decoration: none;
   color: var(--fg);
 }
-.entries.selecting .row { grid-template-columns: 20px 32px 1fr auto; cursor: pointer; }
+.entries.selecting .row { grid-template-columns: 20px 32px 1fr auto auto; cursor: pointer; }
 .row:hover { background: var(--hover); }
 .entry-check:checked ~ .title { color: var(--accent); }
 
@@ -401,6 +401,11 @@ body {
 
 .row .title { font-weight: 500; }
 .row .date { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.rename-btn {
+  border: none; background: none; cursor: pointer;
+  color: var(--muted); font-size: 14px; padding: 2px 6px; border-radius: 4px;
+}
+.rename-btn:hover { color: var(--accent); background: var(--hover); }
 
 /* ---------- Dark mode ---------- */
 

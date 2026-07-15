@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
+from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path
 
 import assemblyai as aai
@@ -769,7 +770,67 @@ class Api:
             except OSError:
                 pass
         path.write_text(html, encoding="utf-8")
+        self._sync_title_from_html(path.parent, html)
         return True
+
+    # An edited title lives in the saved HTML's <title>, but the library
+    # reads titles from the sidecar meta.json — keep the two in sync.
+    # Rebuilding the library re-reads every transcript, so only do it when
+    # the title actually changed.
+    def _sync_title_from_html(self, folder: Path, html: str) -> None:
+        m = re.search(r"<title>(.*?)</title>", html, re.S)
+        if not m:
+            return
+        title = html_unescape(m.group(1)).strip()
+        sidecar = folder / f"transcript{META_SUFFIX}"
+        if not title or not sidecar.exists():
+            return
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            if meta.get("title") == title:
+                return
+            meta["title"] = title
+            sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            rebuild_library()
+        except Exception:
+            pass
+
+    # Called by the rename (pencil) button in library.html. Updates the
+    # display title in the sidecar (which the library reads) and inside
+    # transcript.html (<title> and <h1>). The folder name stays unchanged:
+    # it is an opaque storage key, and renaming it can fail on Windows
+    # while the webview holds the folder's audio file open.
+    def rename_transcript(self, folder: str, new_title: str) -> str:
+        new_title = (new_title or "").strip()
+        base = transcripts_dir().resolve()
+        path = (base / folder).resolve()
+        if new_title and str(path).startswith(str(base)) and path.is_dir():
+            sidecar = path / f"transcript{META_SUFFIX}"
+            try:
+                meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                meta["title"] = new_title
+                sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            html_path = path / "transcript.html"
+            if html_path.exists():
+                try:
+                    esc = html_escape(new_title)
+                    doc = html_path.read_text(encoding="utf-8")
+                    doc = re.sub(
+                        r"<title>.*?</title>",
+                        lambda _: f"<title>{esc}</title>",
+                        doc, count=1, flags=re.S,
+                    )
+                    doc = re.sub(
+                        r'(<h1 id="transcript-title"[^>]*>).*?(</h1>)',
+                        lambda mm: mm.group(1) + esc + mm.group(2),
+                        doc, count=1, flags=re.S,
+                    )
+                    html_path.write_text(doc, encoding="utf-8")
+                except OSError:
+                    pass
+        return rebuild_library().as_uri()
 
     # Called by the Delete selected button in library.html.
     # folders is a list of subfolder names (e.g. ["goldman-sachs-ceo-..."]).
