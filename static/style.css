@@ -193,6 +193,10 @@ body {
 }
 .speaker:focus { box-shadow: 0 0 0 2px var(--accent); }
 
+/* Continuation paragraph (same speaker as the one above): keep the label
+   clickable but de-emphasize it so speaker changes stand out. */
+.paragraph.cont .speaker { opacity: 0.45; font-weight: 400; }
+
 .ts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .bookmark {

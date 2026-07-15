@@ -43,7 +43,7 @@
 
   <section class="paragraphs">
     {% for p in paragraphs %}
-    <article class="paragraph" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
+    <article class="paragraph{{ ' cont' if p.cont }}" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
       <button class="play" title="Play paragraph" aria-label="Play paragraph">▶</button>
       <div class="head">
         <span class="speaker" data-original="{{ p.speaker }}" title="Click to choose or rename this speaker">{{ p.speaker }}</span>
@@ -326,6 +326,7 @@ document.getElementById('reset-speakers').addEventListener('click', () => {
   document.querySelectorAll('.speaker').forEach(el => {
     el.textContent = el.dataset.original;
   });
+  refreshContMarks();
   markDirty();
 });
 
@@ -576,8 +577,21 @@ function allSpeakerNames() {
   return names;
 }
 
+// A .cont paragraph continues the same speaker as the one above and gets
+// a de-emphasized label. Recompute after anything that changes labels or
+// paragraph order so the dimming stays truthful.
+function refreshContMarks() {
+  let prevName = null;
+  document.querySelectorAll('.paragraph').forEach(p => {
+    const name = p.querySelector('.speaker')?.textContent.trim() || '';
+    p.classList.toggle('cont', !!prevName && prevName === name);
+    prevName = name;
+  });
+}
+
 function setSpeaker(el, name) {
   el.textContent = name;
+  refreshContMarks();
   syncSavedQuotes();
   markDirty();
 }
@@ -586,6 +600,7 @@ function renameSpeakerEverywhere(oldName, newName) {
   document.querySelectorAll('.speaker').forEach(s => {
     if (s.textContent.trim() === oldName) s.textContent = newName;
   });
+  refreshContMarks();
   syncSavedQuotes();
   markDirty();
 }
@@ -816,6 +831,7 @@ function splitParagraphAt(para, word) {
 
   wireParagraph(clone);
   paragraphs = Array.from(document.querySelectorAll('.paragraph'));
+  refreshContMarks();
   syncSavedQuotes();
   markDirty();
 }

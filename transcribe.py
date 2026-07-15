@@ -42,6 +42,11 @@ GROQ_MAX_BYTES = 25 * 1024 * 1024  # 25MB free-tier limit
 AUDIO_BITRATE_KBPS = 32  # mono mp3 ~ 14MB/hour at this bitrate
 CHUNK_MINUTES = 20  # used only if encoded audio still exceeds GROQ_MAX_BYTES
 
+# Paragraph breaking within a single speaker turn (group_segments_by_speaker).
+PARA_PAUSE_SECONDS = 1.75  # a pause this long between segments starts a new paragraph
+PARA_SOFT_CHARS = 550  # past this, break at the next sentence-ending segment
+PARA_HARD_CHARS = 900  # past this, break at the next segment boundary regardless
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -446,14 +451,39 @@ def align_speakers(segments: list[Segment], diar: list[tuple[float, float, str]]
         seg.speaker = best_label
 
 
+_SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]]?\s*$")
+
+
 def group_segments_by_speaker(segments: list[Segment]) -> list[dict]:
-    """Merge consecutive same-speaker segments into paragraphs for rendering."""
+    """Merge consecutive same-speaker segments into readable paragraphs.
+
+    A paragraph always ends on a speaker change. Within one speaker's turn
+    it also ends at a long pause between segments, or — once it has grown
+    past PARA_SOFT_CHARS — at the next sentence-ending segment (past
+    PARA_HARD_CHARS, at the next segment boundary regardless), so long
+    monologues don't render as one giant block. Whisper segments are
+    sentence-ish, so breaking between segments needs no word surgery.
+    Continuation paragraphs are marked "cont" so the repeated speaker
+    label can be de-emphasized.
+    """
     paragraphs: list[dict] = []
     for seg in segments:
-        if paragraphs and paragraphs[-1]["speaker"] == seg.speaker:
-            paragraphs[-1]["end"] = seg.end
-            paragraphs[-1]["text"] += " " + seg.text
-            paragraphs[-1]["words"].extend(seg.words)
+        prev = paragraphs[-1] if paragraphs else None
+        same_speaker = prev is not None and prev["speaker"] == seg.speaker
+        if same_speaker:
+            pause = seg.start - prev["end"]
+            length = len(prev["text"])
+            break_here = (
+                pause >= PARA_PAUSE_SECONDS
+                or length >= PARA_HARD_CHARS
+                or (length >= PARA_SOFT_CHARS and _SENTENCE_END.search(prev["text"]))
+            )
+        else:
+            break_here = True
+        if same_speaker and not break_here:
+            prev["end"] = seg.end
+            prev["text"] += " " + seg.text
+            prev["words"].extend(seg.words)
         else:
             paragraphs.append(
                 {
@@ -462,6 +492,7 @@ def group_segments_by_speaker(segments: list[Segment]) -> list[dict]:
                     "end": seg.end,
                     "text": seg.text,
                     "words": list(seg.words),
+                    "cont": same_speaker,
                 }
             )
     for p in paragraphs:
@@ -486,7 +517,12 @@ def read_css() -> str:
     return (resource_dir() / "static" / "style.css").read_text()
 
 
-def render_transcript(meta: dict, paragraphs: list[dict]) -> Path:
+def render_transcript(
+    meta: dict,
+    paragraphs: list[dict],
+    segments: list[Segment] | None = None,
+    diarization: list[tuple[float, float, str]] | None = None,
+) -> Path:
     env = jinja_env()
     template = env.get_template("transcript.html")
     html = template.render(meta=meta, paragraphs=paragraphs, css=read_css())
@@ -494,6 +530,29 @@ def render_transcript(meta: dict, paragraphs: list[dict]) -> Path:
     project_dir.mkdir(exist_ok=True)
     out = project_dir / "transcript.html"
     out.write_text(html, encoding="utf-8")
+    if segments is not None:
+        # Raw pipeline output. The rendered HTML is lossy (edits overwrite
+        # it), so this is the only place exact timings survive — it enables
+        # future re-rendering, re-diarization, and SRT/VTT export.
+        raw = {
+            "segments": [
+                {
+                    "start": s.start,
+                    "end": s.end,
+                    "text": s.text,
+                    "speaker": s.speaker,
+                    "words": s.words,
+                }
+                for s in segments
+            ],
+            "diarization": [
+                {"start": d[0], "end": d[1], "speaker": d[2]}
+                for d in (diarization or [])
+            ],
+        }
+        (project_dir / "segments.json").write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
     meta["transcribed_at"] = datetime.now().astimezone().isoformat()
     sidecar = project_dir / f"transcript{META_SUFFIX}"
     sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -749,7 +808,8 @@ class Api:
         diar = diarize_with_assemblyai(cfg["assemblyai_api_key"], audio, status)
         align_speakers(segments, diar)
         paragraphs = group_segments_by_speaker(segments)
-        html_path = render_transcript(meta, paragraphs)
+        html_path = render_transcript(meta, paragraphs, segments=segments,
+                                      diarization=diar)
         rebuild_library()
         status("Done!")
         return html_path
