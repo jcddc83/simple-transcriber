@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <title>{{ meta.title }}</title>
-<style>{{ css }}</style>
+{# `safe`: this is our own stylesheet — autoescaping corrupts quoted CSS
+   values (font names, content strings) into &#34;/&#39; entities. #}
+<style>{{ css | safe }}</style>
 </head>
 <body>
 <nav class="topnav">

@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>Transcripts</title>
-<style>{{ css }}</style>
+{# `safe`: see transcript.html — autoescaping corrupts quoted CSS values. #}
+<style>{{ css | safe }}</style>
 </head>
 <body>
 <nav class="topnav" id="topnav" style="display:none">
