@@ -159,6 +159,12 @@ body {
 .paragraph.find-match { background: #fef9c3; }
 .paragraph.find-match-active { background: #fde047; outline: 2px solid #facc15; outline-offset: -2px; }
 
+/* Word-level find highlights (CSS Custom Highlight API — only color and
+   background-color apply inside ::highlight). The .find-match classes
+   above remain as the fallback for engines without the API. */
+::highlight(find-hl) { background-color: #fde68a; color: #1a1a1a; }
+::highlight(find-hl-active) { background-color: #f59e0b; color: #1a1a1a; }
+
 .play {
   grid-row: 1 / span 2;
   align-self: start;
@@ -493,4 +499,6 @@ body {
   /* Find match highlights */
   .paragraph.find-match        { background: #422006; }
   .paragraph.find-match-active { background: #713f12; outline-color: #92400e; }
+  ::highlight(find-hl) { background-color: #713f12; color: #fef3c7; }
+  ::highlight(find-hl-active) { background-color: #b45309; color: #ffffff; }
 }

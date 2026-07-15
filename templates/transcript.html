@@ -408,39 +408,107 @@ async function exportTranscript(format) {
 document.getElementById('export-txt').addEventListener('click', () => exportTranscript('txt'));
 document.getElementById('export-md').addEventListener('click',  () => exportTranscript('md'));
 
-// In-page find (Ctrl+F / Cmd+F) — highlights matching paragraphs, steps through them.
-// Operates on .paragraph elements so word spans used for playback are never disturbed.
+// In-page find (Ctrl+F / Cmd+F). Where the CSS Custom Highlight API is
+// available (WebView2/Chromium 105+, WKWebView/Safari 17.2+) the exact
+// matched text is highlighted via Ranges — zero DOM mutation, so the
+// .word spans that drive playback are untouched and nothing leaks into
+// saved files. Engines without the API keep the old behavior of
+// highlighting whole matching paragraphs.
 (function initFind() {
   const bar      = document.getElementById('find-bar');
   const input    = document.getElementById('find-input');
   const countEl  = document.getElementById('find-count');
+  const useHl    = typeof Highlight !== 'undefined' && CSS.highlights;
+  // useHl: [{range, para}]  —  fallback: [para]
   let matches = [], current = -1;
 
   function clearHighlights() {
-    matches.forEach(p => p.classList.remove('find-match', 'find-match-active'));
+    if (useHl) {
+      CSS.highlights.delete('find-hl');
+      CSS.highlights.delete('find-hl-active');
+    }
+    document.querySelectorAll('.find-match, .find-match-active').forEach(p =>
+      p.classList.remove('find-match', 'find-match-active'));
     matches = []; current = -1; countEl.textContent = '';
   }
 
   function showCurrent() {
-    matches.forEach((p, i) =>
-      p.classList.toggle('find-match-active', i === current));
     countEl.textContent = matches.length ? `${current + 1} / ${matches.length}` : '';
-    if (matches[current]) matches[current].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (!matches.length) return;
+    if (useHl) {
+      CSS.highlights.set('find-hl-active', new Highlight(matches[current].range));
+      matches[current].para.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else {
+      matches.forEach((p, i) => p.classList.toggle('find-match-active', i === current));
+      matches[current].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  // All matches of `lower` inside one .text as Ranges, spanning word spans
+  // and whitespace freely (also matches inside a single word).
+  function findRangesIn(textEl, lower) {
+    const nodes = [];
+    const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
+    let full = '', n;
+    while ((n = walker.nextNode())) {
+      nodes.push({ node: n, start: full.length });
+      full += n.textContent;
+    }
+    const ranges = [];
+    const fullLower = full.toLowerCase();
+    let idx = fullLower.indexOf(lower);
+    if (idx === -1) return ranges;
+
+    function locate(offset) {
+      for (const { node, start } of nodes) {
+        if (offset <= start + node.textContent.length) return [node, offset - start];
+      }
+      const last = nodes[nodes.length - 1];
+      return [last.node, last.node.textContent.length];
+    }
+
+    while (idx !== -1) {
+      const r = new Range();
+      r.setStart(...locate(idx));
+      r.setEnd(...locate(idx + lower.length));
+      ranges.push(r);
+      idx = fullLower.indexOf(lower, idx + lower.length);
+    }
+    return ranges;
   }
 
   function runFind(q) {
     clearHighlights();
     if (!q) return;
     const lower = q.toLowerCase();
-    document.querySelectorAll('.paragraph').forEach(p => {
-      if (p.querySelector('.text').textContent.toLowerCase().includes(lower)) {
-        p.classList.add('find-match');
-        matches.push(p);
+    if (useHl) {
+      document.querySelectorAll('.paragraph .text').forEach(textEl => {
+        const para = textEl.closest('.paragraph');
+        findRangesIn(textEl, lower).forEach(range => matches.push({ range, para }));
+      });
+      if (matches.length) {
+        CSS.highlights.set('find-hl', new Highlight(...matches.map(m => m.range)));
       }
-    });
+    } else {
+      document.querySelectorAll('.paragraph').forEach(p => {
+        if (p.querySelector('.text').textContent.toLowerCase().includes(lower)) {
+          p.classList.add('find-match');
+          matches.push(p);
+        }
+      });
+    }
     if (matches.length) { current = 0; showCurrent(); }
     else countEl.textContent = 'No matches';
   }
+
+  // Edits invalidate live Ranges — re-run the current search shortly after
+  // typing stops while the find bar is open.
+  let refindTimer = null;
+  document.querySelector('.paragraphs').addEventListener('input', () => {
+    if (bar.hidden || !input.value.trim()) return;
+    clearTimeout(refindTimer);
+    refindTimer = setTimeout(() => runFind(input.value.trim()), 300);
+  });
 
   function openBar()  { bar.hidden = false; input.focus(); input.select(); }
   function closeBar() { bar.hidden = true; clearHighlights(); input.value = ''; }
