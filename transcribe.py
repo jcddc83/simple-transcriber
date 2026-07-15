@@ -760,6 +760,14 @@ class Api:
         path = (base / relative_path).resolve()
         if not str(path).startswith(str(base)):
             return False  # reject path traversal attempts
+        if path.exists():
+            # Keep the previous version as a one-step safety net, since
+            # autosave overwrites in place. Invisible to the library, which
+            # only globs */transcript.meta.json.
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".bak"))
+            except OSError:
+                pass
         path.write_text(html, encoding="utf-8")
         return True
 
@@ -840,6 +848,24 @@ def main() -> None:
 
     window.events.moved += _save_geometry
     window.events.resized += _save_geometry
+
+    def _flush_unsaved(*_):
+        # Transcript pages expose __getSaveState with any unsaved edits;
+        # other pages (shell, library, transcripts rendered before this
+        # feature) return null and close immediately.
+        try:
+            state = window.evaluate_js(
+                "window.__getSaveState ? JSON.stringify(window.__getSaveState()) : null"
+            )
+            if state:
+                data = json.loads(state)
+                if data.get("dirty") and data.get("html") and data.get("relPath"):
+                    api.save_transcript(data["html"], data["relPath"])
+        except Exception:
+            pass
+        return True  # never block the window from closing
+
+    window.events.closing += _flush_unsaved
     webview.start()
 
 

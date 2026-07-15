@@ -74,7 +74,7 @@
   <span id="cur" class="time">0:00</span>
   <input id="seek" type="range" min="0" max="0" step="0.1" value="0">
   <span id="dur" class="time">0:00</span>
-  <button id="save-btn" title="Save speaker label edits back to this file">Save edits</button>
+  <button id="save-btn" title="Edits autosave in the app; click to save immediately">Save edits</button>
 </footer>
 
 <button id="follow-pill" hidden>↓ Jump to now</button>
@@ -212,22 +212,73 @@ function serializeForSave() {
   return '<!doctype html>\n' + root.outerHTML;
 }
 
-document.getElementById('save-btn').addEventListener('click', async () => {
-  const html = serializeForSave();
-  const btn = document.getElementById('save-btn');
+// ---- Saving & autosave --------------------------------------------------
+// In the app (pywebview) edits autosave shortly after you stop changing
+// things, and pending edits are flushed before navigation and on app close.
+// In a plain browser there is no bridge, so saving stays manual.
+const saveBtn = document.getElementById('save-btn');
+let dirty = false;
+let saveTimer = null;
+let savePromise = null;
 
+function relTranscriptPath() {
+  const parts = location.pathname.split('/').map(p => decodeURIComponent(p));
+  const txIdx = parts.findIndex(p => p === 'Transcripts');
+  return txIdx >= 0 ? parts.slice(txIdx + 1).join('/') : parts[parts.length - 1];
+}
+
+function markDirty() {
+  dirty = true;
+  if (!window.pywebview) return;
+  saveBtn.textContent = 'Unsaved…';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(doSave, 2500);
+}
+
+async function doSave() {
+  if (!window.pywebview) return;
+  clearTimeout(saveTimer);
+  if (savePromise) await savePromise;
+  if (!dirty) return;
+  dirty = false;
+  saveBtn.textContent = 'Saving…';
+  savePromise = pywebview.api.save_transcript(serializeForSave(), relTranscriptPath())
+    .then(ok => { if (!ok) dirty = true; })
+    .catch(() => { dirty = true; });
+  await savePromise;
+  savePromise = null;
+  saveBtn.textContent = dirty ? 'Unsaved…' : 'Saved ✓';
+}
+
+// Read by the Python side on app close to flush unsaved edits.
+window.__getSaveState = () => ({
+  dirty,
+  relPath: relTranscriptPath(),
+  html: dirty ? serializeForSave() : null,
+});
+
+// Text edits anywhere in the transcript body or title count as changes.
+document.querySelector('.paragraphs').addEventListener('input', markDirty);
+document.getElementById('transcript-title').addEventListener('input', markDirty);
+
+// Flush pending edits before leaving for the library.
+document.querySelector('.nav-primary').addEventListener('click', async e => {
+  if (!window.pywebview) return;
+  e.preventDefault();
+  const href = e.currentTarget.href;
+  await doSave();
+  window.location.href = href;
+});
+
+saveBtn.addEventListener('click', async () => {
   if (window.pywebview) {
-    const parts = location.pathname.split('/').map(p => decodeURIComponent(p));
-    const txIdx = parts.findIndex(p => p === 'Transcripts');
-    const relPath = txIdx >= 0 ? parts.slice(txIdx + 1).join('/') : parts[parts.length - 1];
-    await pywebview.api.save_transcript(html, relPath);
-    btn.textContent = 'Saved ✓';
-    setTimeout(() => { btn.textContent = 'Save edits'; }, 2000);
+    dirty = true;
+    await doSave();
     return;
   }
 
   // Browser fallback: file picker (Chrome/Edge) or plain download.
-  const blob = new Blob([html], { type: 'text/html' });
+  const blob = new Blob([serializeForSave()], { type: 'text/html' });
   if (window.showSaveFilePicker) {
     try {
       const handle = await window.showSaveFilePicker({
@@ -251,6 +302,7 @@ document.getElementById('save-btn').addEventListener('click', async () => {
   function initNav() {
     btn.style.display = '';
     btn.addEventListener('click', async () => {
+      await doSave();
       const url = await pywebview.api.show_home();
       window.location.href = url;
     });
@@ -274,6 +326,7 @@ document.getElementById('reset-speakers').addEventListener('click', () => {
   document.querySelectorAll('.speaker').forEach(el => {
     el.textContent = el.dataset.original;
   });
+  markDirty();
 });
 
 // Copy full transcript to clipboard
@@ -518,6 +571,7 @@ function wireParagraph(p) {
           if (s.textContent.trim() === oldName) s.textContent = newName.trim();
         });
       }
+      markDirty();
     });
   }
   const bm = p.querySelector('.bookmark');
@@ -529,6 +583,7 @@ function wireParagraph(p) {
       p.classList.toggle('bookmarked', now);
       bm.textContent = now ? '★' : '☆';
       syncSavedQuotes();
+      markDirty();
     });
   }
 }
@@ -610,6 +665,7 @@ function splitParagraphAt(para, word) {
   wireParagraph(clone);
   paragraphs = Array.from(document.querySelectorAll('.paragraph'));
   syncSavedQuotes();
+  markDirty();
 }
 
 document.addEventListener('click', (e) => {
