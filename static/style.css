@@ -407,6 +407,24 @@ body {
 }
 .rename-btn:hover { color: var(--accent); background: var(--hover); }
 
+/* ---------- Popup menus (speaker picker, paragraph context menu) ---------- */
+
+.popup-menu {
+  position: fixed; z-index: 100; min-width: 180px; max-width: 320px;
+  max-height: 60vh; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 4px;
+}
+.menu-item {
+  display: block; width: 100%; text-align: left; border: none; background: none;
+  padding: 7px 10px; border-radius: 5px; cursor: pointer;
+  font-size: 14px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.menu-item:hover { background: var(--hover); }
+.menu-item.checked::after { content: ' ✓'; color: var(--accent); }
+.menu-sep { border-top: 1px solid var(--border); margin: 4px 6px; }
+
 /* ---------- Dark mode ---------- */
 
 @media (prefers-color-scheme: dark) {

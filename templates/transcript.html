@@ -46,12 +46,12 @@
     <article class="paragraph" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
       <button class="play" title="Play paragraph" aria-label="Play paragraph">▶</button>
       <div class="head">
-        <span class="speaker" data-original="{{ p.speaker }}" title="Click to rename this speaker">{{ p.speaker }}</span>
+        <span class="speaker" data-original="{{ p.speaker }}" title="Click to choose or rename this speaker">{{ p.speaker }}</span>
         <span class="ts">{{ p.start_label }}</span>
         <button class="bookmark" title="Bookmark this paragraph">☆</button>
         <button class="copy-quote" title="Copy quote with speaker and timestamp">⎘</button>
       </div>
-      <p class="text" contenteditable="true" spellcheck="false" title="Shift+click a word to split this paragraph at that word.">{% if p.words %}{% for w in p.words %}<span class="word" data-start="{{ '%.3f'|format(w.start) }}">{{ w.word }}</span> {% endfor %}{% else %}{{ p.text }}{% endif %}</p>
+      <p class="text" contenteditable="true" spellcheck="false" title="Right-click to split this paragraph or change its speaker.">{% if p.words %}{% for w in p.words %}<span class="word" data-start="{{ '%.3f'|format(w.start) }}">{{ w.word }}</span> {% endfor %}{% else %}{{ p.text }}{% endif %}</p>
     </article>
     {% endfor %}
   </section>
@@ -519,11 +519,164 @@ function fallbackDownload(blob, filename) {
 }
 
 // ---------------------------------------------------------------------
+// Popup menus (speaker picker + paragraph context menu).
+// Runtime-only UI: carries .runtime-ui so serializeForSave() strips it,
+// and it is removed from the DOM whenever it closes.
+// ---------------------------------------------------------------------
+
+let openMenu = null;
+
+function closeMenu() {
+  if (openMenu) { openMenu.remove(); openMenu = null; }
+}
+
+// items: array of {label, action, checked} or '-' for a separator.
+function showMenu(items, x, y) {
+  closeMenu();
+  const menu = document.createElement('div');
+  menu.className = 'popup-menu runtime-ui';
+  items.forEach(it => {
+    if (it === '-') {
+      const sep = document.createElement('div');
+      sep.className = 'menu-sep';
+      menu.appendChild(sep);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'menu-item' + (it.checked ? ' checked' : '');
+    btn.textContent = it.label;
+    btn.addEventListener('click', () => { closeMenu(); it.action(); });
+    menu.appendChild(btn);
+  });
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+  openMenu = menu;
+}
+
+// Capture phase runs before the handler that opens a new menu, so a click
+// anywhere (including one that opens another menu) first closes this one.
+document.addEventListener('click', e => {
+  if (openMenu && !openMenu.contains(e.target)) closeMenu();
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+
+// ---------------------------------------------------------------------
+// Speakers: every label is picked from / added to the transcript's own
+// speaker list, so assigning an existing speaker never risks a typo.
+// ---------------------------------------------------------------------
+
+function allSpeakerNames() {
+  const names = [];
+  document.querySelectorAll('.speaker').forEach(s => {
+    const n = s.textContent.trim();
+    if (n && !names.includes(n)) names.push(n);
+  });
+  return names;
+}
+
+function setSpeaker(el, name) {
+  el.textContent = name;
+  syncSavedQuotes();
+  markDirty();
+}
+
+function renameSpeakerEverywhere(oldName, newName) {
+  document.querySelectorAll('.speaker').forEach(s => {
+    if (s.textContent.trim() === oldName) s.textContent = newName;
+  });
+  syncSavedQuotes();
+  markDirty();
+}
+
+function openSpeakerMenu(sp, x, y) {
+  const current = sp.textContent.trim();
+  const items = allSpeakerNames().map(name => ({
+    label: name,
+    checked: name === current,
+    action: () => { if (name !== current) setSpeaker(sp, name); },
+  }));
+  items.push('-');
+  items.push({ label: 'New speaker…', action: () => {
+    const n = prompt('New speaker name:', '');
+    if (n && n.trim()) setSpeaker(sp, n.trim());
+  }});
+  items.push({ label: `Rename "${current}" everywhere…`, action: () => {
+    const n = prompt(`Rename all "${current}" labels to:`, current);
+    if (n && n.trim() && n.trim() !== current) renameSpeakerEverywhere(current, n.trim());
+  }});
+  showMenu(items, x, y);
+}
+
+// ---------------------------------------------------------------------
 // Split a paragraph when one mis-attributes two speakers.
-// Shift+click any word: that word becomes the first word of a new
-// paragraph below, labeled "Speaker ?" until the user renames it.
+// Right-click (or Ctrl+Enter at the caret, or Shift+click a word): the
+// chosen word becomes the first word of a new paragraph below, labeled
+// "Speaker ?" until the user assigns a speaker.
 // Bookmarks propagate to both halves.
 // ---------------------------------------------------------------------
+
+// Resolve a DOM node to the .word span the action should target. A node
+// in the whitespace between words snaps to the next word, so the action
+// never silently misses.
+function wordFromNode(node, sourceText) {
+  if (!node) return null;
+  const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const w = el && el.closest ? el.closest('.word') : null;
+  if (w) return w;
+  if (node.nodeType === Node.TEXT_NODE && node.parentNode === sourceText) {
+    let n = node.nextSibling;
+    while (n && !(n.nodeType === Node.ELEMENT_NODE && n.classList.contains('word'))) {
+      n = n.nextSibling;
+    }
+    return n;
+  }
+  return null;
+}
+
+function wordAtPoint(x, y, sourceText) {
+  let node = null;
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    if (r) node = r.startContainer;
+  } else if (document.caretPositionFromPoint) {
+    const pos = document.caretPositionFromPoint(x, y);
+    if (pos) node = pos.offsetNode;
+  }
+  return wordFromNode(node, sourceText);
+}
+
+// Splitting at the first word would move the whole text and leave the
+// original paragraph empty.
+function canSplitAt(sourceText, word) {
+  if (!word || word.parentNode !== sourceText) return false;
+  return word !== sourceText.querySelector('.word');
+}
+
+// Right-click inside a paragraph: split at that word and/or reassign the
+// paragraph's speaker.
+document.addEventListener('contextmenu', e => {
+  const text = e.target.closest && e.target.closest('.text');
+  if (!text) return;
+  const para = text.closest('.paragraph');
+  if (!para) return;
+  e.preventDefault();
+  const items = [];
+  const word = wordAtPoint(e.clientX, e.clientY, text);
+  if (canSplitAt(text, word)) {
+    items.push({ label: '✂ Split paragraph here', action: () => splitParagraphAt(para, word) });
+  }
+  const sp = para.querySelector('.speaker');
+  if (sp) {
+    const current = sp.textContent.trim();
+    const others = allSpeakerNames().filter(n => n !== current);
+    if (items.length && others.length) items.push('-');
+    others.forEach(name =>
+      items.push({ label: `Assign to ${name}`, action: () => setSpeaker(sp, name) }));
+  }
+  if (items.length) showMenu(items, e.clientX, e.clientY);
+});
 
 function uniqueParaId(base) {
   if (!document.getElementById(base)) return base;
@@ -544,7 +697,16 @@ function wireParagraph(p) {
   });
   const text = p.querySelector('.text');
   if (text) text.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); text.blur(); }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl+Enter: split this paragraph at the word holding the caret.
+      const sel = window.getSelection();
+      const word = sel && wordFromNode(sel.anchorNode, text);
+      if (canSplitAt(text, word)) { text.blur(); splitParagraphAt(p, word); }
+      return;
+    }
+    text.blur();
   });
   const cq = p.querySelector('.copy-quote');
   if (cq) cq.addEventListener('click', async () => {
@@ -561,18 +723,7 @@ function wireParagraph(p) {
   const sp = p.querySelector('.speaker');
   if (sp) {
     sp.style.cursor = 'pointer';
-    sp.addEventListener('click', () => {
-      const oldName = sp.textContent.trim();
-      const newName = prompt('Rename this label:', oldName);
-      if (!newName || !newName.trim() || newName.trim() === oldName) return;
-      sp.textContent = newName.trim();
-      if (confirm(`Also rename all other "${oldName}" labels?`)) {
-        document.querySelectorAll('.speaker').forEach(s => {
-          if (s.textContent.trim() === oldName) s.textContent = newName.trim();
-        });
-      }
-      markDirty();
-    });
+    sp.addEventListener('click', e => openSpeakerMenu(sp, e.clientX, e.clientY));
   }
   const bm = p.querySelector('.bookmark');
   if (bm) {
@@ -609,11 +760,12 @@ function splitParagraphAt(para, word) {
 
   const head = document.createElement('div');
   head.className = 'head';
-  const origSpeaker = para.querySelector('.speaker');
   const spk = document.createElement('span');
   spk.className = 'speaker';
-  spk.dataset.original = origSpeaker ? (origSpeaker.dataset.original || '') : '';
-  spk.title = 'Click to rename this speaker';
+  // The split half starts unattributed, so "Reset speakers" must restore
+  // "Speaker ?" — not the source paragraph's original speaker.
+  spk.dataset.original = 'Speaker ?';
+  spk.title = 'Click to choose a speaker';
   spk.textContent = 'Speaker ?';
   head.appendChild(spk);
   const tsEl = document.createElement('span');
@@ -636,7 +788,7 @@ function splitParagraphAt(para, word) {
   newText.className = 'text';
   newText.setAttribute('contenteditable', 'true');
   newText.setAttribute('spellcheck', 'false');
-  newText.setAttribute('title', 'Shift+click a word to split this paragraph at that word.');
+  newText.setAttribute('title', 'Right-click to split this paragraph or change its speaker.');
 
   // Move the clicked word and every sibling that follows it (words plus
   // the whitespace text nodes between them) into the new .text.
@@ -670,21 +822,15 @@ function splitParagraphAt(para, word) {
 
 document.addEventListener('click', (e) => {
   if (!e.shiftKey) return;
-  const word = e.target.closest && e.target.closest('.word');
-  if (!word) return;
-  const para = word.closest('.paragraph');
+  const para = e.target.closest && e.target.closest('.paragraph');
   if (!para) return;
   const sourceText = para.querySelector('.text');
-  if (!sourceText || word.parentNode !== sourceText) return;
-  const allWords = sourceText.querySelectorAll('.word');
-  // First word: nothing to split (would leave an empty paragraph above).
-  // Last word: would leave the original paragraph empty.
-  if (word === allWords[0] || word === allWords[allWords.length - 1]) {
-    e.preventDefault();
-    return;
-  }
+  if (!sourceText || !sourceText.contains(e.target)) return;
+  // Snap clicks that land between words to the next word instead of
+  // silently doing nothing.
+  const word = wordAtPoint(e.clientX, e.clientY, sourceText);
   e.preventDefault();
-  splitParagraphAt(para, word);
+  if (canSplitAt(sourceText, word)) splitParagraphAt(para, word);
 });
 </script>
 </body>
