@@ -196,58 +196,24 @@ window.addEventListener('scroll', () => {
 
 followPill.addEventListener('click', reengageFollow);
 
-paragraphs.forEach((p) => {
-  p.querySelector('.play').addEventListener('click', () => {
-    audio.currentTime = parseFloat(p.dataset.start);
-    audio.play();
-    reengageFollow();
-  });
-});
+// All per-paragraph bindings (play / text editing / copy-quote / speaker /
+// bookmark) live in wireParagraph() so paragraphs rendered at load and
+// paragraphs cloned by splitting share a single code path.
+paragraphs.forEach(wireParagraph);
 
-// Inline text editing: Enter commits/exits, don't allow line breaks within a paragraph
-document.querySelectorAll('.text').forEach(el => {
-  el.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
-  });
-});
-
-// Copy quote button: copies `"text" — Speaker [0:00]` to clipboard
-document.querySelectorAll('.copy-quote').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const para = btn.closest('.paragraph');
-    const text = para.querySelector('.text').textContent.trim();
-    const speaker = para.querySelector('.speaker').textContent.trim();
-    const ts = para.querySelector('.ts').textContent.trim();
-    const formatted = `"${text}" — ${speaker} [${ts}]`;
-    try {
-      await navigator.clipboard.writeText(formatted);
-      const orig = btn.textContent;
-      btn.textContent = '✓';
-      setTimeout(() => { btn.textContent = orig; }, 1200);
-    } catch (e) {
-      console.error('Copy failed', e);
-    }
-  });
-});
-
-// Speaker rename: click to rename just this label; confirm to rename all matching
-document.querySelectorAll('.speaker').forEach(el => {
-  el.style.cursor = 'pointer';
-  el.addEventListener('click', () => {
-    const oldName = el.textContent.trim();
-    const newName = prompt(`Rename this label:`, oldName);
-    if (!newName || !newName.trim() || newName.trim() === oldName) return;
-    el.textContent = newName.trim();
-    if (confirm(`Also rename all other "${oldName}" labels?`)) {
-      document.querySelectorAll('.speaker').forEach(s => {
-        if (s.textContent.trim() === oldName) s.textContent = newName.trim();
-      });
-    }
-  });
-});
+// Serialize the document for saving: work on a clone so runtime-only UI
+// (.runtime-ui) and transient playback/find state never reach the file.
+function serializeForSave() {
+  const root = document.documentElement.cloneNode(true);
+  root.querySelectorAll('.runtime-ui').forEach(el => el.remove());
+  root.querySelectorAll('.active-word').forEach(el => el.classList.remove('active-word'));
+  root.querySelectorAll('.paragraph').forEach(p =>
+    p.classList.remove('active', 'find-match', 'find-match-active'));
+  return '<!doctype html>\n' + root.outerHTML;
+}
 
 document.getElementById('save-btn').addEventListener('click', async () => {
-  const html = '<!doctype html>\n' + document.documentElement.outerHTML;
+  const html = serializeForSave();
   const btn = document.getElementById('save-btn');
 
   if (window.pywebview) {
@@ -490,19 +456,6 @@ function syncSavedQuotes() {
   sqSection.hidden = marked.length === 0;
 }
 
-document.querySelectorAll('.bookmark').forEach(btn => {
-  // Restore filled star if paragraph already bookmarked (from saved HTML)
-  if (btn.closest('.paragraph').classList.contains('bookmarked')) btn.textContent = '★';
-  btn.addEventListener('click', e => {
-    e.stopPropagation();
-    const para = btn.closest('.paragraph');
-    const now = !para.classList.contains('bookmarked');
-    para.classList.toggle('bookmarked', now);
-    btn.textContent = now ? '★' : '☆';
-    syncSavedQuotes();
-  });
-});
-
 syncSavedQuotes();
 
 function fallbackDownload(blob, filename) {
@@ -526,9 +479,9 @@ function uniqueParaId(base) {
   return `${base}_${n}`;
 }
 
-// Mirrors the per-element bindings declared earlier (play / text keydown
-// / copy-quote / speaker rename / bookmark) so a freshly cloned paragraph
-// behaves identically to one rendered at page load.
+// Single source of per-paragraph bindings (play / text keydown /
+// copy-quote / speaker rename / bookmark), used for paragraphs rendered
+// at page load and for paragraphs cloned by splitting.
 function wireParagraph(p) {
   const play = p.querySelector('.play');
   if (play) play.addEventListener('click', () => {
