@@ -15,6 +15,12 @@
     <h1>Transcripts</h1>
     <div class="lib-actions">
       <input type="search" id="lib-search" placeholder="Search titles and transcripts…" autocomplete="off">
+      <select id="lib-sort" title="Sort transcripts">
+        <option value="newest" selected>Newest</option>
+        <option value="oldest">Oldest</option>
+        <option value="title">Title A–Z</option>
+        <option value="longest">Longest</option>
+      </select>
       <span class="count">{{ entries|length }} item{{ '' if entries|length == 1 else 's' }}</span>
       <button id="select-btn" style="display:none">Select</button>
       <button id="delete-btn" style="display:none" disabled>Delete</button>
@@ -27,7 +33,9 @@
   {% else %}
   <ul class="entries">
     {% for e in entries %}
-    <li class="entry" data-folder="{{ e.href.split('/')[0] }}" data-body="{{ e.body_text }}">
+    <li class="entry" data-folder="{{ e.href.split('/')[0] }}" data-body="{{ e.body_text }}"
+        data-title="{{ e.title|lower }}" data-sorttime="{{ e.transcribed_at or e.upload_date_raw }}"
+        data-duration="{{ e.duration or 0 }}">
       <a class="row" href="{{ e.href }}">
         <input type="checkbox" class="entry-check">
         <span class="icon icon-{{ e.platform }}">
@@ -37,6 +45,7 @@
           {% endif %}
         </span>
         <span class="title">{{ e.title }}</span>
+        <span class="dur">{{ e.duration_label }}</span>
         <span class="date">{{ e.upload_date }}</span>
         {% if '/' in e.href %}<button class="rename-btn" title="Rename transcript" style="display:none">✎</button>{% endif %}
       </a>
@@ -46,6 +55,30 @@
   {% endif %}
 </main>
 <script>
+(function initSort() {
+  const sel = document.getElementById('lib-sort');
+  const list = document.querySelector('.entries');
+  if (!sel || !list) return;
+  const keys = {
+    newest:  li => li.dataset.sorttime || '',
+    oldest:  li => li.dataset.sorttime || '',
+    title:   li => li.dataset.title || '',
+    longest: li => parseFloat(li.dataset.duration) || 0,
+  };
+  sel.addEventListener('change', () => {
+    const mode = sel.value;
+    const key = keys[mode];
+    const desc = mode === 'newest' || mode === 'longest';
+    Array.from(list.querySelectorAll('.entry'))
+      .sort((a, b) => {
+        const ka = key(a), kb = key(b);
+        const cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+        return desc ? -cmp : cmp;
+      })
+      .forEach(li => list.appendChild(li));
+  });
+})();
+
 (function initSearch() {
   const input = document.getElementById('lib-search');
   if (!input) return;

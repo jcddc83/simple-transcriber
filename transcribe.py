@@ -737,6 +737,7 @@ def rebuild_library() -> Path:
         html_path = sidecar.parent / "transcript.html"
         if not html_path.exists():
             continue
+        duration = float(m.get("duration") or 0)
         entries.append({
             "title": m.get("title", m.get("safe_name", "")),
             "channel": m.get("channel", ""),
@@ -746,6 +747,8 @@ def rebuild_library() -> Path:
             "platform": m.get("platform", "generic"),
             "href": f"{sidecar.parent.name}/transcript.html",
             "body_text": extract_body_text(html_path),
+            "duration": duration,
+            "duration_label": format_timestamp(duration) if duration else "",
         })
     # Old flat layout: <Transcripts>/<safe>.meta.json (backwards compat)
     for sidecar in td.glob(f"*{META_SUFFIX}"):
@@ -756,6 +759,7 @@ def rebuild_library() -> Path:
         html_path = td / f"{m['safe_name']}.html"
         if not html_path.exists():
             continue
+        duration = float(m.get("duration") or 0)
         entries.append({
             "title": m.get("title", m["safe_name"]),
             "channel": m.get("channel", ""),
@@ -765,6 +769,8 @@ def rebuild_library() -> Path:
             "platform": m.get("platform", "generic"),
             "href": f"{m['safe_name']}.html",
             "body_text": extract_body_text(html_path),
+            "duration": duration,
+            "duration_label": format_timestamp(duration) if duration else "",
         })
     entries.sort(
         key=lambda e: e.get("transcribed_at") or e.get("upload_date_raw", ""),

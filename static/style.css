@@ -371,6 +371,17 @@ body {
 }
 #lib-search:focus { outline: none; border-color: var(--accent); }
 
+#lib-sort {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.row .dur { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 #delete-btn {
   border: 1px solid #dc2626;
   background: #dc2626;
@@ -394,14 +405,14 @@ body {
 
 .row {
   display: grid;
-  grid-template-columns: 32px 1fr auto auto;
+  grid-template-columns: 32px 1fr auto auto auto;
   align-items: center;
   gap: 14px;
   padding: 14px 8px;
   text-decoration: none;
   color: var(--fg);
 }
-.entries.selecting .row { grid-template-columns: 20px 32px 1fr auto auto; cursor: pointer; }
+.entries.selecting .row { grid-template-columns: 20px 32px 1fr auto auto auto; cursor: pointer; }
 .row:hover { background: var(--hover); }
 .entry-check:checked ~ .title { color: var(--accent); }
 
@@ -490,6 +501,7 @@ body {
 
   /* Library search */
   #lib-search { background: #1e293b; color: var(--fg); }
+  #lib-sort { background: #1e293b; color: var(--fg); }
 
   /* Find bar */
   #find-bar { box-shadow: -2px 2px 8px rgba(0,0,0,0.4); }
