@@ -566,14 +566,18 @@ def transcribe_with_groq(api_key: str, chunks: list[tuple[float, Path]], status,
 
 def diarize_with_assemblyai(api_key: str, audio: Path, status,
                             progress=_NULL_PROGRESS,
-                            duration: float = 0.0) -> list[tuple[float, float, str]]:
+                            duration: float = 0.0,
+                            speakers_expected: int = 0) -> list[tuple[float, float, str]]:
     """Returns list of (start_sec, end_sec, speaker_label)."""
     status("Identifying speakers with AssemblyAI...")
     progress.stage("diarize")
     aai.settings.api_key = api_key
-    config = aai.TranscriptionConfig(
-        speaker_labels=True,
-    )
+    # Telling the diarizer how many voices to expect is the single biggest
+    # lever on label quality; 0/blank means auto-detect.
+    kwargs = {"speaker_labels": True}
+    if speakers_expected and int(speakers_expected) > 0:
+        kwargs["speakers_expected"] = int(speakers_expected)
+    config = aai.TranscriptionConfig(**kwargs)
     # submit + poll instead of the SDK's blocking transcribe() so the bar
     # can move: queued/processing/completed transitions are real; the fill
     # while processing is an elapsed-time estimate against the audio length.
@@ -861,7 +865,7 @@ class Api:
         return {"ok": True}
 
     # Called by the Transcribe button in shell.html.
-    def transcribe(self, url: str, hints: str = "") -> None:
+    def transcribe(self, url: str, hints: str = "", speakers: int = 0) -> None:
         urls = [u.strip() for u in url.splitlines() if u.strip()]
         if not urls:
             self._js("updateStatus('Paste a URL first.')")
@@ -869,7 +873,8 @@ class Api:
             return
         cfg = load_config()
         threading.Thread(
-            target=self._pipeline_queue, args=(urls, hints, cfg), daemon=True
+            target=self._pipeline_queue, args=(urls, hints, cfg),
+            kwargs={"speakers": speakers}, daemon=True
         ).start()
 
     # Chunked upload flow used by the Upload file button in shell.html.
@@ -902,7 +907,8 @@ class Api:
             f.write(data)
         return True
 
-    def upload_finish(self, upload_id: str, hints: str = "") -> None:
+    def upload_finish(self, upload_id: str, hints: str = "",
+                      speakers: int = 0) -> None:
         with self._uploads_lock:
             entry = self._uploads.pop(upload_id, None)
         if entry is None:
@@ -916,7 +922,8 @@ class Api:
         title = Path(original_filename).stem or "Uploaded audio"
         threading.Thread(
             target=self._pipeline_queue, args=([str(path)], hints, cfg),
-            kwargs={"is_file": True, "title": title}, daemon=True,
+            kwargs={"is_file": True, "title": title, "speakers": speakers},
+            daemon=True,
         ).start()
 
     def upload_cancel(self, upload_id: str) -> None:
@@ -930,14 +937,16 @@ class Api:
                 pass
 
     def _pipeline_queue(self, sources: list[str], hints: str, cfg: dict,
-                        is_file: bool = False, title: str | None = None) -> None:
+                        is_file: bool = False, title: str | None = None,
+                        speakers: int = 0) -> None:
         total = len(sources)
         last_html: Path | None = None
         for i, src in enumerate(sources, 1):
             prefix = f"[{i}/{total}] " if total > 1 else ""
             try:
                 last_html = self._pipeline(src, hints, cfg, status_prefix=prefix,
-                                           is_file=is_file, title=title)
+                                           is_file=is_file, title=title,
+                                           speakers=speakers)
             except Exception as e:
                 label = "file" if is_file else "URL"
                 safe = str(e).replace("\\", "\\\\").replace("'", "\\'")
@@ -952,7 +961,8 @@ class Api:
                 self._window.load_url(last_html.as_uri())
 
     def _pipeline(self, src: str, hints: str, cfg: dict, status_prefix: str = "",
-                  is_file: bool = False, title: str | None = None) -> Path:
+                  is_file: bool = False, title: str | None = None,
+                  speakers: int = 0) -> Path:
         def status(msg: str) -> None:
             safe = (status_prefix + msg).replace("\\", "\\\\").replace("'", "\\'")
             self._js(f"updateStatus('{safe}')")
@@ -977,7 +987,8 @@ class Api:
         if chunk_dir.exists():
             shutil.rmtree(chunk_dir, ignore_errors=True)
         diar = diarize_with_assemblyai(cfg["assemblyai_api_key"], audio, status,
-                                       progress=progress, duration=duration)
+                                       progress=progress, duration=duration,
+                                       speakers_expected=speakers)
         align_speakers(segments, diar)
         progress.stage("render")
         paragraphs = group_segments_by_speaker(segments)
