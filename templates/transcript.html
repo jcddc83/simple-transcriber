@@ -739,8 +739,31 @@ function canSplitAt(sourceText, word) {
   return word !== sourceText.querySelector('.word');
 }
 
-// Right-click inside a paragraph: split at that word and/or reassign the
-// paragraph's speaker.
+// Inverse of splitParagraphAt: fold this paragraph's text into the one
+// above it, keeping the earlier start time. Bookmarks survive on the
+// merged result.
+function mergeWithPrevious(para) {
+  const prev = para.previousElementSibling;
+  if (!prev || !prev.classList.contains('paragraph')) return;
+  const prevText = prev.querySelector('.text');
+  const text = para.querySelector('.text');
+  if (!prevText || !text) return;
+  prevText.appendChild(document.createTextNode(' '));
+  while (text.firstChild) prevText.appendChild(text.firstChild);
+  if (para.classList.contains('bookmarked')) {
+    prev.classList.add('bookmarked');
+    const bm = prev.querySelector('.bookmark');
+    if (bm) bm.textContent = '★';
+  }
+  para.remove();
+  paragraphs = Array.from(document.querySelectorAll('.paragraph'));
+  refreshContMarks();
+  syncSavedQuotes();
+  markDirty();
+}
+
+// Right-click inside a paragraph: split at that word, merge upward,
+// and/or reassign the paragraph's speaker.
 document.addEventListener('contextmenu', e => {
   const text = e.target.closest && e.target.closest('.text');
   if (!text) return;
@@ -751,6 +774,10 @@ document.addEventListener('contextmenu', e => {
   const word = wordAtPoint(e.clientX, e.clientY, text);
   if (canSplitAt(text, word)) {
     items.push({ label: '✂ Split paragraph here', action: () => splitParagraphAt(para, word) });
+  }
+  const prevPara = para.previousElementSibling;
+  if (prevPara && prevPara.classList.contains('paragraph')) {
+    items.push({ label: '⇧ Merge with paragraph above', action: () => mergeWithPrevious(para) });
   }
   const sp = para.querySelector('.speaker');
   if (sp) {
