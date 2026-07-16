@@ -351,6 +351,8 @@ def download_audio(url: str, out_dir: Path, status,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "color": "no_color",  # raw ANSI codes would otherwise leak into
+                              # DownloadError.msg and garble the status text
         "ffmpeg_location": _ffmpeg_location(),
         "progress_hooks": [_hook],
         "postprocessors": [
