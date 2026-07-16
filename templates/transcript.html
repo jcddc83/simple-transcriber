@@ -211,6 +211,11 @@ paragraphs.forEach(wireParagraph);
 // Serialize the document for saving: work on a clone so runtime-only UI
 // (.runtime-ui) and transient playback/find state never reach the file.
 function serializeForSave() {
+  // The title's blur handler normally syncs <title>, but a save can fire
+  // while the h1 still has focus (autosave debounce, app close) — sync
+  // here so the sidecar/library never sees a stale title.
+  const t = document.getElementById('transcript-title').textContent.trim();
+  if (t) document.title = t;
   const root = document.documentElement.cloneNode(true);
   root.querySelectorAll('.runtime-ui').forEach(el => el.remove());
   root.querySelectorAll('.active-word').forEach(el => el.classList.remove('active-word'));
