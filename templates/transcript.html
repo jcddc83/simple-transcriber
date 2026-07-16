@@ -262,11 +262,13 @@ async function doSave() {
   saveBtn.textContent = dirty ? 'Unsaved…' : 'Saved ✓';
 }
 
-// Read by the Python side on app close to flush unsaved edits.
-window.__getSaveState = () => ({
-  dirty,
-  relPath: relTranscriptPath(),
-  html: dirty ? serializeForSave() : null,
+// Flush pending edits whenever the window loses focus — this covers the
+// app being closed (the window blurs before it goes away) without any
+// Python-side hook into the close event, which would deadlock the UI
+// thread. doSave() is a no-op when nothing is dirty.
+window.addEventListener('blur', () => { doSave(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') doSave();
 });
 
 // Text edits anywhere in the transcript body or title count as changes.
@@ -618,31 +620,50 @@ document.getElementById('export-btn').addEventListener('click', e => {
   const replaceToggle = document.getElementById('find-replace-toggle');
   if (!useHl) replaceToggle.hidden = true;
 
-  // A match is replaceable only when it lies within a single text node —
-  // replacing across word spans would destroy their timing data.
   function replaceMatch(m, replacement) {
     const r = m.range;
-    if (r.startContainer !== r.endContainer ||
-        r.startContainer.nodeType !== Node.TEXT_NODE) return false;
-    const node = r.startContainer;
-    node.textContent = node.textContent.slice(0, r.startOffset) + replacement +
-                       node.textContent.slice(r.endOffset);
-    return true;
+    try {
+      // Fast path: match within one text node (single word or plain text)
+      // — splice in place, keeping the word span and its timing intact.
+      if (r.startContainer === r.endContainer &&
+          r.startContainer.nodeType === Node.TEXT_NODE) {
+        const node = r.startContainer;
+        node.textContent = node.textContent.slice(0, r.startOffset) + replacement +
+                           node.textContent.slice(r.endOffset);
+        return true;
+      }
+      // Phrase spanning word spans: delete the matched range and insert the
+      // replacement as plain text. The replacement itself loses per-word
+      // karaoke timing (unavoidable — the original words are gone), but all
+      // surrounding word spans keep theirs.
+      const text = m.para.querySelector('.text');
+      r.deleteContents();
+      r.insertNode(document.createTextNode(replacement));
+      // deleteContents can leave word spans it fully emptied; drop them.
+      text.querySelectorAll('.word').forEach(w => {
+        if (!w.textContent) w.remove();
+      });
+      text.normalize();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function doReplace(all) {
     if (!useHl || !matches.length) return;
     const q = input.value.trim();
     const replacement = replaceInput.value;
-    let replaced = 0, skipped = 0;
-    // Reverse order keeps earlier offsets valid within a shared text node.
+    let replaced = 0, failed = 0;
+    // Reverse document order: earlier live Ranges are unaffected by edits
+    // made after them.
     const targets = all ? matches.slice().reverse()
                         : (matches[current] ? [matches[current]] : []);
-    targets.forEach(m => replaceMatch(m, replacement) ? replaced++ : skipped++);
+    targets.forEach(m => replaceMatch(m, replacement) ? replaced++ : failed++);
     if (replaced) markDirty();
     runFind(q);
     countEl.textContent = `Replaced ${replaced}` +
-      (skipped ? ` (${skipped} skipped — spans words)` : '') +
+      (failed ? ` (${failed} failed)` : '') +
       (matches.length ? ` · ${matches.length} left` : '');
   }
 

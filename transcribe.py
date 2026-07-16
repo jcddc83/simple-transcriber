@@ -24,9 +24,12 @@ import threading
 import time
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -330,11 +333,177 @@ def _media_duration(path: Path) -> float | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Open-podcast-ecosystem fallback.
+# Apple's episode pages currently error/block non-browser requests, and
+# Spotify's audio is DRM-protected (off-limits by design). Most shows on
+# both, however, publish the same episodes in an open RSS feed. These
+# helpers resolve a failing Apple/Spotify link to the episode's direct
+# enclosure URL via official, keyless metadata APIs — no page scraping,
+# no DRM involved.
+# ---------------------------------------------------------------------------
+
+_ITUNES_NS = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
+
+
+def _http_get_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "SimpleTranscriber"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_get_bytes(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "SimpleTranscriber"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
+def _norm_tokens(s: str) -> set[str]:
+    return {t for t in re.sub(r"[^a-z0-9]+", " ", s.lower()).split() if t}
+
+
+def _title_score(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def _parse_itunes_duration(s: str | None) -> int:
+    """itunes:duration is either plain seconds or H:MM:SS / M:SS."""
+    if not s:
+        return 0
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    try:
+        sec = 0
+        for part in s.split(":"):
+            sec = sec * 60 + int(part)
+        return sec
+    except ValueError:
+        return 0
+
+
+def _rfc2822_to_yyyymmdd(s: str) -> str:
+    try:
+        return parsedate_to_datetime(s).strftime("%Y%m%d")
+    except Exception:
+        return ""
+
+
+def resolve_apple_episode(url: str, status) -> tuple[str, dict]:
+    """Resolve an Apple Podcasts episode URL to (enclosure_url, meta_overrides)
+    via the iTunes Lookup API + the show's public RSS feed."""
+    m_show = re.search(r"/id(\d+)", url)
+    if not m_show:
+        raise RuntimeError("Could not find the show id in that Apple Podcasts URL.")
+    m_ep = re.search(r"[?&]i=(\d+)", url)
+    episode_id = m_ep.group(1) if m_ep else ""
+    m_slug = re.search(r"/podcast/([^/]+)/id\d+", url)
+    slug_tokens = _norm_tokens(m_slug.group(1)) if m_slug else set()
+
+    status("Apple blocked the page — using the show's RSS feed...")
+    lookup = _http_get_json(f"https://itunes.apple.com/lookup?id={m_show.group(1)}")
+    results = lookup.get("results") or []
+    feed_url = results[0].get("feedUrl") if results else None
+    if not feed_url:
+        raise RuntimeError("Apple's lookup API didn't return an RSS feed for this show.")
+    show_title = results[0].get("collectionName", "")
+
+    root = ET.fromstring(_http_get_bytes(feed_url))
+    candidates = []
+    for item in root.findall("./channel/item"):
+        title = (item.findtext("title") or "").strip()
+        enclosure = item.find("enclosure")
+        audio = enclosure.get("url") if enclosure is not None else None
+        if not title or not audio:
+            continue
+        candidates.append({
+            "title": title,
+            "audio": audio,
+            "ids": f'{item.findtext("guid") or ""} {item.findtext("link") or ""}',
+            "pub": item.findtext("pubDate") or "",
+            "dur": _parse_itunes_duration(item.findtext(f"{_ITUNES_NS}duration")),
+        })
+
+    match = next((c for c in candidates if episode_id and episode_id in c["ids"]), None)
+    if match is None and slug_tokens:
+        best = max(candidates, key=lambda c: _title_score(slug_tokens, _norm_tokens(c["title"])),
+                   default=None)
+        if best and _title_score(slug_tokens, _norm_tokens(best["title"])) >= 0.5:
+            match = best
+    if match is None:
+        raise RuntimeError(
+            "Found the show's RSS feed but couldn't identify this episode in it."
+        )
+    return match["audio"], {
+        "title": match["title"],
+        "channel": show_title,
+        "upload_date_raw": _rfc2822_to_yyyymmdd(match["pub"]),
+        "duration": match["dur"],
+    }
+
+
+def resolve_spotify_episode(url: str, status) -> tuple[str, dict]:
+    """Resolve a Spotify episode URL to (enclosure_url, meta_overrides).
+
+    Spotify's own audio is DRM-protected and not touched. The episode title
+    comes from Spotify's public oEmbed endpoint; Apple's keyless episode
+    search then locates the same episode in the show's open RSS feed.
+    Spotify-exclusive shows aren't in any public feed and get a plain
+    explanation instead of a cryptic DRM error."""
+    if "/episode/" not in url:
+        raise RuntimeError(
+            "That's a Spotify show link — paste a specific episode link "
+            "(open.spotify.com/episode/...) so it can be matched to the "
+            "show's public feed."
+        )
+    status("Spotify audio is DRM-protected — finding this episode's public feed...")
+    oembed = _http_get_json(
+        "https://open.spotify.com/oembed?url=" + urllib.parse.quote(url, safe="")
+    )
+    ep_title = (oembed.get("title") or "").strip()
+    if not ep_title:
+        raise RuntimeError("Couldn't read the episode title from Spotify.")
+
+    target = _norm_tokens(ep_title)
+    data = _http_get_json(
+        "https://itunes.apple.com/search?media=podcast&entity=podcastEpisode"
+        "&limit=25&term=" + urllib.parse.quote(ep_title)
+    )
+    best, best_score = None, 0.0
+    for r in data.get("results", []):
+        if not r.get("episodeUrl"):
+            continue
+        score = _title_score(target, _norm_tokens(r.get("trackName") or ""))
+        if score > best_score:
+            best, best_score = r, score
+    if best is None or best_score < 0.5:
+        raise RuntimeError(
+            "This episode wasn't found in the open podcast ecosystem — it may "
+            "be Spotify-exclusive. If you have access to the audio, download "
+            "it and use Upload file instead."
+        )
+    release = best.get("releaseDate") or ""
+    return best["episodeUrl"], {
+        "title": best.get("trackName") or ep_title,
+        "channel": best.get("collectionName", ""),
+        "upload_date_raw": release[:10].replace("-", "") if release else "",
+        "duration": int((best.get("trackTimeMillis") or 0) / 1000),
+    }
+
+
 def download_audio(url: str, out_dir: Path, status,
                    progress=_NULL_PROGRESS) -> tuple[Path, dict]:
     """Download mono MP3 + return (audio_path, metadata dict)."""
     status("Downloading audio...")
     progress.stage("download")
+
+    # Spotify never works through yt-dlp (DRM) — resolve to the episode's
+    # open-feed enclosure up front.
+    overrides: dict = {}
+    fetch_url = url
+    if "open.spotify.com/" in url:
+        fetch_url, overrides = resolve_spotify_episode(url, status)
+        status("Downloading audio...")
 
     def _hook(d: dict) -> None:
         if d.get("status") == "downloading":
@@ -365,7 +534,16 @@ def download_audio(url: str, out_dir: Path, status,
         "postprocessor_args": ["-ac", "1"],  # mono
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        try:
+            info = ydl.extract_info(fetch_url, download=True)
+        except yt_dlp.utils.DownloadError:
+            if "podcasts.apple.com" not in fetch_url:
+                raise
+            # Apple's episode pages currently 500/block non-browser
+            # requests; fall back to the show's public RSS feed.
+            fetch_url, overrides = resolve_apple_episode(url, status)
+            status("Downloading audio...")
+            info = ydl.extract_info(fetch_url, download=True)
 
     video_id = info.get("id", "audio")
     tmp_path = out_dir / f"_tmp_{video_id}.mp3"
@@ -375,12 +553,18 @@ def download_audio(url: str, out_dir: Path, status,
             raise RuntimeError("Audio download failed.")
         tmp_path = candidates[0]
 
-    title = info.get("title") or video_id
+    # When an Apple/Spotify link was resolved through its open RSS feed,
+    # the feed metadata (overrides) beats the generic extractor's, which
+    # only sees a bare enclosure URL.
+    title = overrides.get("title") or info.get("title") or video_id
     safe = sanitize_filename(title)
     project_dir = out_dir / safe
     project_dir.mkdir(exist_ok=True)
     final_audio = project_dir / "audio.mp3"
     tmp_path.replace(final_audio)
+
+    duration = info.get("duration") or overrides.get("duration") or 0
+    upload_date_raw = overrides.get("upload_date_raw") or info.get("upload_date") or ""
 
     status("Encoding audio...")
     progress.stage("encode")
@@ -388,7 +572,7 @@ def download_audio(url: str, out_dir: Path, status,
     _run_ffmpeg(
         ["-i", str(final_audio),
          "-ar", "16000", "-ac", "1", "-b:a", "32k", str(reenc)],
-        duration=info.get("duration") or None,
+        duration=duration or None,
         on_progress=progress.update,
     )
     reenc.replace(final_audio)
@@ -396,12 +580,12 @@ def download_audio(url: str, out_dir: Path, status,
     meta = {
         "title": title,
         "safe_name": safe,
-        "channel": info.get("uploader") or info.get("channel") or "",
-        "upload_date_raw": info.get("upload_date") or "",
-        "upload_date": parse_upload_date(info.get("upload_date")),
-        "url": info.get("webpage_url") or url,
-        "platform": platform_from_extractor(info.get("extractor")),
-        "duration": info.get("duration") or 0,
+        "channel": overrides.get("channel") or info.get("uploader") or info.get("channel") or "",
+        "upload_date_raw": upload_date_raw,
+        "upload_date": parse_upload_date(upload_date_raw),
+        "url": url if overrides else (info.get("webpage_url") or url),
+        "platform": "podcast" if overrides else platform_from_extractor(info.get("extractor")),
+        "duration": duration,
         "audio_filename": "audio.mp3",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -1293,24 +1477,12 @@ def main() -> None:
 
     window.events.moved += _save_geometry
     window.events.resized += _save_geometry
-
-    def _flush_unsaved(*_):
-        # Transcript pages expose __getSaveState with any unsaved edits;
-        # other pages (shell, library, transcripts rendered before this
-        # feature) return null and close immediately.
-        try:
-            state = window.evaluate_js(
-                "window.__getSaveState ? JSON.stringify(window.__getSaveState()) : null"
-            )
-            if state:
-                data = json.loads(state)
-                if data.get("dirty") and data.get("html") and data.get("relPath"):
-                    api.save_transcript(data["html"], data["relPath"])
-        except Exception:
-            pass
-        return True  # never block the window from closing
-
-    window.events.closing += _flush_unsaved
+    # NOTE: do not call window.evaluate_js from a window.events.closing
+    # handler — on Windows the closing event runs on the UI thread and
+    # evaluate_js blocks waiting for a result only that same thread can
+    # produce, deadlocking the app ("not responding" on close). Unsaved
+    # edits are instead flushed by the page itself on window blur /
+    # visibilitychange, which fires before the window closes.
     webview.start()
 
 
