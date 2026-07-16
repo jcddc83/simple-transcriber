@@ -117,11 +117,25 @@ body {
   padding: 6px 10px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   z-index: 6;
   box-shadow: -2px 2px 8px rgba(0,0,0,0.08);
 }
 #find-bar[hidden] { display: none; }
+#replace-row { display: flex; align-items: center; gap: 6px; width: 100%; }
+#replace-row[hidden] { display: none; }
+#replace-input {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+#replace-input:focus { outline: none; border-color: var(--accent); }
 #find-input {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -506,6 +520,7 @@ body {
   /* Find bar */
   #find-bar { box-shadow: -2px 2px 8px rgba(0,0,0,0.4); }
   #find-input { background: #1e293b; color: var(--fg); }
+  #replace-input { background: #1e293b; color: var(--fg); }
   #find-bar button { background: #1e293b; color: var(--fg); }
 
   /* Find match highlights */
