@@ -55,19 +55,23 @@ Notes:
 - **Persist `segments.json`** ✅ — raw segments/words/diarization saved at render time.
   Unlocks future re-rendering, exact-timing exports, and re-diarization. (Old transcripts
   don't have one; that data is unrecoverable for them.)
-- **Merge paragraphs** — inverse of split, in the right-click menu. Matters more now that
-  paragraph breaking produces more paragraphs. S.
-- **Export SRT/VTT** — word/paragraph timings are already in the DOM; standard in comparable
-  tools (whisperX, whisply, ScrAIbe). S/M.
-- **Speaker-count hint** — optional "how many speakers?" field passed to AssemblyAI's
-  `speakers_expected`; the single biggest lever on diarization quality. S.
-- **Find-and-replace** — fix a recurring misheard name in one pass; builds on the find
-  machinery. M.
-- **Library upgrades** — sort dropdown (date/title/duration); show duration and speaker names
-  in rows. S/M.
-- **Refresh old transcripts** — parse an old file's stable DOM and re-render it through the
-  current template, preserving edits. Converts every future viewer improvement from "new files
-  only" to "one click for all files" — the highest-leverage medium-term item. M/L.
+- **Merge paragraphs** ✅ — "Merge with paragraph above" in the right-click menu; the inverse
+  of split, with bookmarks surviving the merge.
+- **Export SRT/VTT** ✅ — the nav's export buttons collapsed into one "↓ Export" menu
+  (.txt / .md / .srt / .vtt). Subtitle cues come from the word timings in the DOM: ≤ 12 words
+  or 6s per cue, early breaks at pauses; SRT carries speaker prefixes, VTT uses voice tags.
+- **Speaker-count hint** ✅ — optional "Speakers" field passed to AssemblyAI's
+  `speakers_expected`; the single biggest lever on diarization quality. Blank = auto.
+- **Find-and-replace** ✅ — Ctrl+H (or the ⇄ button in the find bar). Replaces matches that
+  sit inside a single word/text node — the misheard-name case — and skips + reports matches
+  spanning multiple words, so playback timings can't be corrupted.
+- **Library upgrades** ✅ — duration column plus a sort select (Newest / Oldest / Title A–Z /
+  Longest).
+- **Refresh old transcripts** ✅ — the ⟳ button per row (or "⟳ Update all") re-renders an
+  existing transcript through the current template. Edits (text, speaker names, bookmarks,
+  splits, title) are parsed out of the saved DOM and preserved; the previous file is kept as
+  `transcript.html.bak`. This is what turns every future viewer improvement into "one click
+  for all files" instead of "new files only".
 
 ## Tier 3 — lower ROI / bigger swings (mapped for completeness)
 

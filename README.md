@@ -75,12 +75,20 @@ A typical 45-minute interview costs well under $0.50 total.
 - **Local file upload** — drop in any audio or video file (MP3, M4A, WAV, MP4, MOV,
   MKV, etc.) instead of a URL; ffmpeg extracts and transcodes audio automatically
 - **Library page** — every transcript, searchable by title, date, or transcript content,
-  sorted by when you transcribed it; rename any transcript with the pencil button.
-  Use Ctrl+F inside a transcript to jump through matches — the exact word or
-  phrase is highlighted.
+  with duration shown and sortable by date, title, or length; rename any transcript with
+  the pencil button. Use Ctrl+F inside a transcript to jump through matches — the exact
+  word or phrase is highlighted.
 - **Light and dark mode** — follows your OS preference automatically
 - **Copy and export** — copy a single quote (pre-formatted with attribution and
-  timestamp), copy the full transcript, or export as `.txt` / `.md`
+  timestamp), copy the full transcript, or export as `.txt` / `.md` / `.srt` / `.vtt`
+  (subtitles use the real word timings)
+- **Find and replace** — Ctrl+H to fix a recurring misheard name in one pass;
+  replacements never touch word timings
+- **Merge paragraphs** — right-click → "Merge with paragraph above", the inverse of splitting
+- **Speaker count field** — tell the diarizer how many voices to expect for
+  noticeably better speaker labels (leave blank to auto-detect)
+- **Update old transcripts** — the ⟳ button in the Library re-renders any existing
+  transcript with the latest features, preserving all your edits (a `.bak` is kept)
 
 ## Keyboard shortcuts (in a transcript)
 
@@ -90,6 +98,7 @@ A typical 45-minute interview costs well under $0.50 total.
 | `←` | Seek back 10 seconds |
 | `→` | Seek forward 10 seconds |
 | `Ctrl+F` | Find in transcript |
+| `Ctrl+H` | Find and replace |
 | `Ctrl+Enter` | While editing: split the paragraph at the caret |
 
 Playback shortcuts are disabled while editing text so they don't interfere with typing.

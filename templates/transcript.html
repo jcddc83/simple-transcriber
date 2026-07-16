@@ -549,9 +549,16 @@ document.getElementById('export-btn').addEventListener('click', e => {
     let idx = fullLower.indexOf(lower);
     if (idx === -1) return ranges;
 
-    function locate(offset) {
+    // A start offset on a node boundary resolves to the FOLLOWING node
+    // (strict <), an end offset to the preceding one (<=) — so a match
+    // covering exactly one word span yields a single-node Range, which
+    // replace relies on.
+    function locate(offset, isEnd) {
       for (const { node, start } of nodes) {
-        if (offset <= start + node.textContent.length) return [node, offset - start];
+        const len = node.textContent.length;
+        if (isEnd ? offset <= start + len : offset < start + len) {
+          return [node, offset - start];
+        }
       }
       const last = nodes[nodes.length - 1];
       return [last.node, last.node.textContent.length];
@@ -559,8 +566,8 @@ document.getElementById('export-btn').addEventListener('click', e => {
 
     while (idx !== -1) {
       const r = new Range();
-      r.setStart(...locate(idx));
-      r.setEnd(...locate(idx + lower.length));
+      r.setStart(...locate(idx, false));
+      r.setEnd(...locate(idx + lower.length, true));
       ranges.push(r);
       idx = fullLower.indexOf(lower, idx + lower.length);
     }
