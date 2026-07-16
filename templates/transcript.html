@@ -12,8 +12,7 @@
   <a class="nav-primary" href="../index.html">← Back to Library</a>
   <button id="nav-home" style="display:none">⌂ Home</button>
   <button id="reset-speakers" title="Revert all speaker labels to their original names">Reset speakers</button>
-  <button id="export-txt" title="Download transcript as plain text file">↓ Export .txt</button>
-  <button id="export-md" title="Download transcript as Markdown file">↓ Export .md</button>
+  <button id="export-btn" title="Download transcript (.txt, .md, .srt, .vtt)">↓ Export</button>
   <button id="copy-all" style="margin-left:auto" title="Copy full transcript to clipboard">⎘ Copy transcript</button>
 </nav>
 <div id="find-bar" hidden>
@@ -352,6 +351,57 @@ document.getElementById('copy-all').addEventListener('click', async () => {
   }
 });
 
+// Subtitle timestamp: HH:MM:SS,mmm (srt) or HH:MM:SS.mmm (vtt)
+function fmtCueTime(t, sep) {
+  const ms = Math.max(0, Math.round(t * 1000));
+  const h = String(Math.floor(ms / 3600000)).padStart(2, '0');
+  const m = String(Math.floor(ms / 60000) % 60).padStart(2, '0');
+  const s = String(Math.floor(ms / 1000) % 60).padStart(2, '0');
+  return `${h}:${m}:${s}${sep}${String(ms % 1000).padStart(3, '0')}`;
+}
+
+// Build subtitle cues from the current DOM. Word spans give real timings;
+// cues cap at 12 words / 6 seconds and break early at pauses >= 0.8s.
+// Paragraphs without word spans become one cue at the paragraph start.
+function buildCues() {
+  const cues = [];
+  paragraphs.forEach(p => {
+    const speaker = p.querySelector('.speaker').textContent.trim();
+    const words = Array.from(p.querySelectorAll('.word'));
+    let first = true;
+    const push = (start, text, lastT) => {
+      cues.push({ start, text, speaker, first, lastT });
+      first = false;
+    };
+    if (!words.length) {
+      const text = p.querySelector('.text').textContent.trim();
+      const t = parseFloat(p.dataset.start) || 0;
+      if (text) push(t, text, t);
+      return;
+    }
+    let start = null, toks = [], lastT = 0;
+    words.forEach(w => {
+      const token = w.textContent.trim();
+      if (!token) return;
+      const t = parseFloat(w.dataset.start) || 0;
+      if (start !== null && (toks.length >= 12 || t - start >= 6 || t - lastT >= 0.8)) {
+        push(start, toks.join(' '), lastT);
+        start = null; toks = [];
+      }
+      if (start === null) start = t;
+      toks.push(token); lastT = t;
+    });
+    if (toks.length) push(start, toks.join(' '), lastT);
+  });
+  cues.forEach((c, i) => {
+    const next = cues[i + 1];
+    const end = next ? next.start - 0.05
+      : (isFinite(audio.duration) ? audio.duration : c.lastT + 4);
+    c.end = Math.max(end, c.start + 0.5);
+  });
+  return cues;
+}
+
 // Shared helper: build export content from current DOM state
 function buildExportContent(format) {
   const title = document.getElementById('transcript-title').textContent.trim();
@@ -361,6 +411,25 @@ function buildExportContent(format) {
   const url = metaRow.querySelector('.original')?.href || '';
   const safe = title.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'transcript';
 
+  let content, mimeType, filename;
+  if (format === 'srt') {
+    content = buildCues().map((c, i) =>
+      `${i + 1}\n${fmtCueTime(c.start, ',')} --> ${fmtCueTime(c.end, ',')}\n` +
+      `${c.first ? c.speaker + ': ' : ''}${c.text}`
+    ).join('\n\n') + '\n';
+    mimeType = 'application/x-subrip';
+    filename = safe + '.srt';
+    return { content, mimeType, filename };
+  }
+  if (format === 'vtt') {
+    content = 'WEBVTT\n\n' + buildCues().map(c =>
+      `${fmtCueTime(c.start, '.')} --> ${fmtCueTime(c.end, '.')}\n<v ${c.speaker}>${c.text}`
+    ).join('\n\n') + '\n';
+    mimeType = 'text/vtt';
+    filename = safe + '.vtt';
+    return { content, mimeType, filename };
+  }
+
   const body = paragraphs.map(p => {
     const speaker = p.querySelector('.speaker').textContent.trim();
     const ts = p.querySelector('.ts').textContent.trim();
@@ -368,7 +437,6 @@ function buildExportContent(format) {
     return format === 'md' ? `**${speaker}** [${ts}]\n${text}` : `${speaker} [${ts}]\n${text}`;
   }).join('\n\n');
 
-  let content, mimeType, filename;
   if (format === 'md') {
     const meta = [channel, date].filter(Boolean).join(' · ');
     const hdr = `# ${title}\n${meta}${meta && url ? ' | ' : ''}${url ? `[Original](${url})` : ''}\n\n---`;
@@ -384,11 +452,18 @@ function buildExportContent(format) {
   return { content, mimeType, filename };
 }
 
-// Export as .txt or .md — opens save dialog when available, falls back to download
+const EXPORT_KINDS = {
+  txt: 'Text file',
+  md: 'Markdown file',
+  srt: 'SubRip subtitles',
+  vtt: 'WebVTT subtitles',
+};
+
+// Export — opens save dialog when available, falls back to download
 async function exportTranscript(format) {
   const { content, mimeType, filename } = buildExportContent(format);
   const blob = new Blob([content], { type: mimeType });
-  const description = format === 'md' ? 'Markdown file' : 'Text file';
+  const description = EXPORT_KINDS[format] || 'File';
   const ext = '.' + format;
   if (window.showSaveFilePicker) {
     try {
@@ -407,8 +482,15 @@ async function exportTranscript(format) {
   fallbackDownload(blob, filename);
 }
 
-document.getElementById('export-txt').addEventListener('click', () => exportTranscript('txt'));
-document.getElementById('export-md').addEventListener('click',  () => exportTranscript('md'));
+document.getElementById('export-btn').addEventListener('click', e => {
+  const r = e.currentTarget.getBoundingClientRect();
+  showMenu([
+    { label: 'Plain text (.txt)', action: () => exportTranscript('txt') },
+    { label: 'Markdown (.md)', action: () => exportTranscript('md') },
+    { label: 'Subtitles (.srt)', action: () => exportTranscript('srt') },
+    { label: 'Subtitles (.vtt)', action: () => exportTranscript('vtt') },
+  ], r.left, r.bottom + 4);
+});
 
 // In-page find (Ctrl+F / Cmd+F). Where the CSS Custom Highlight API is
 // available (WebView2/Chromium 105+, WKWebView/Safari 17.2+) the exact
