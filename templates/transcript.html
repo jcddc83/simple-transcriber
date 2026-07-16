@@ -50,10 +50,10 @@
 
   <section class="paragraphs">
     {% for p in paragraphs %}
-    <article class="paragraph{{ ' cont' if p.cont }}" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
+    <article class="paragraph{{ ' cont' if p.cont }}{{ ' bookmarked' if p.bookmarked }}" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
       <button class="play" title="Play paragraph" aria-label="Play paragraph">▶</button>
       <div class="head">
-        <span class="speaker" data-original="{{ p.speaker }}" title="Click to choose or rename this speaker">{{ p.speaker }}</span>
+        <span class="speaker" data-original="{{ p.original or p.speaker }}" title="Click to choose or rename this speaker">{{ p.speaker }}</span>
         <span class="ts">{{ p.start_label }}</span>
         <button class="bookmark" title="Bookmark this paragraph">☆</button>
         <button class="copy-quote" title="Copy quote with speaker and timestamp">⎘</button>

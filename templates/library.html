@@ -24,6 +24,7 @@
       <span class="count">{{ entries|length }} item{{ '' if entries|length == 1 else 's' }}</span>
       <button id="select-btn" style="display:none">Select</button>
       <button id="delete-btn" style="display:none" disabled>Delete</button>
+      <button id="refresh-all-btn" style="display:none" title="Re-render every transcript with the latest viewer features (backups are kept)">⟳ Update all</button>
       <button id="new-btn" style="display:none">⌂ Home</button>
     </div>
   </header>
@@ -47,7 +48,12 @@
         <span class="title">{{ e.title }}</span>
         <span class="dur">{{ e.duration_label }}</span>
         <span class="date">{{ e.upload_date }}</span>
-        {% if '/' in e.href %}<button class="rename-btn" title="Rename transcript" style="display:none">✎</button>{% endif %}
+        <span class="entry-actions">
+          {% if '/' in e.href %}
+          <button class="rename-btn" title="Rename transcript" style="display:none">✎</button>
+          <button class="refresh-btn" title="Update this transcript to the latest features (a .bak backup is kept)" style="display:none">⟳</button>
+          {% endif %}
+        </span>
       </a>
     </li>
     {% endfor %}
@@ -132,6 +138,44 @@ function initPywebview() {
       window.location.href = url;
     });
   });
+
+  // Refresh: re-render a transcript through the latest template so old
+  // files pick up new viewer features. Edits are preserved; the previous
+  // version is kept as transcript.html.bak.
+  document.querySelectorAll('.refresh-btn').forEach(btn => {
+    btn.style.display = '';
+    btn.addEventListener('click', async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      btn.disabled = true;
+      const url = await pywebview.api.refresh_transcript(btn.closest('.entry').dataset.folder);
+      btn.disabled = false;
+      if (!url) { alert('Could not update this transcript — it was left unchanged.'); return; }
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = '⟳'; }, 1500);
+    });
+  });
+
+  const refreshAll = document.getElementById('refresh-all-btn');
+  const refreshables = Array.from(document.querySelectorAll('.entry'))
+    .filter(li => li.querySelector('.refresh-btn'));
+  if (refreshables.length) {
+    refreshAll.style.display = '';
+    refreshAll.addEventListener('click', async () => {
+      const n = refreshables.length;
+      if (!confirm(`Update ${n} transcript${n > 1 ? 's' : ''} to the latest features? A .bak backup of each is kept.`)) return;
+      refreshAll.disabled = true;
+      let done = 0, failed = 0;
+      for (const li of refreshables) {
+        const url = await pywebview.api.refresh_transcript(li.dataset.folder);
+        if (url) done++; else failed++;
+        refreshAll.textContent = `Updating ${done + failed}/${n}…`;
+      }
+      refreshAll.textContent = failed ? `Updated ${done}, ${failed} failed` : `✓ Updated ${done}`;
+      refreshAll.disabled = false;
+      setTimeout(() => { refreshAll.textContent = '⟳ Update all'; }, 4000);
+    });
+  }
 
   selectBtn.style.display = '';
   let selecting = false;

@@ -436,11 +436,12 @@ body {
 
 .row .title { font-weight: 500; }
 .row .date { color: var(--muted); font-size: 13px; white-space: nowrap; }
-.rename-btn {
+.entry-actions { display: flex; gap: 2px; }
+.rename-btn, .refresh-btn {
   border: none; background: none; cursor: pointer;
   color: var(--muted); font-size: 14px; padding: 2px 6px; border-radius: 4px;
 }
-.rename-btn:hover { color: var(--accent); background: var(--hover); }
+.rename-btn:hover, .refresh-btn:hover { color: var(--accent); background: var(--hover); }
 
 /* ---------- Popup menus (speaker picker, paragraph context menu) ---------- */
 

@@ -28,6 +28,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape as html_escape, unescape as html_unescape
+from html.parser import HTMLParser
 from pathlib import Path
 
 import assemblyai as aai
@@ -725,6 +726,104 @@ def render_transcript(
     return out
 
 
+class _TranscriptDOMParser(HTMLParser):
+    """Extracts title and paragraph content from a rendered transcript.
+
+    Used by refresh_transcript to re-render an existing file through the
+    current template while preserving the user's edits (text, speaker
+    names, bookmarks, splits). Tracks only the stable DOM shape shared by
+    every template version: h1#transcript-title, article.paragraph
+    [data-start], .speaker[data-original], and .text with .word
+    [data-start] spans (or plain text)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.paragraphs: list[dict] = []
+        self._in_title = False
+        self._in_speaker = False
+        self._in_text = False
+        self._para: dict | None = None
+        self._word: dict | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        cls = (a.get("class") or "").split()
+        if tag == "h1" and a.get("id") == "transcript-title":
+            self._in_title = True
+        elif tag == "article" and "paragraph" in cls:
+            self._para = {
+                "start": float(a.get("data-start") or 0),
+                "speaker": "",
+                "original": a.get("data-original") or "",
+                "bookmarked": "bookmarked" in cls,
+                "words": [],
+                "text": "",
+            }
+        elif self._para is not None and tag == "span" and "speaker" in cls:
+            self._in_speaker = True
+            self._para["original"] = a.get("data-original") or ""
+        elif self._para is not None and tag == "p" and "text" in cls:
+            self._in_text = True
+        elif self._in_text and tag == "span" and "word" in cls:
+            self._word = {"word": "", "start": float(a.get("data-start") or 0)}
+
+    def handle_endtag(self, tag):
+        if tag == "h1" and self._in_title:
+            self._in_title = False
+        elif tag == "span" and self._word is not None:
+            self._word["word"] = self._word["word"].strip()
+            if self._word["word"]:
+                self._para["words"].append(self._word)
+            self._word = None
+        elif tag == "span" and self._in_speaker:
+            self._in_speaker = False
+        elif tag == "p" and self._in_text:
+            self._in_text = False
+        elif tag == "article" and self._para is not None:
+            self._para["text"] = " ".join(self._para["text"].split())
+            self.paragraphs.append(self._para)
+            self._para = None
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title += data
+        elif self._word is not None:
+            self._word["word"] += data
+        elif self._in_speaker:
+            self._para["speaker"] += data
+        elif self._in_text:
+            self._para["text"] += data
+
+
+def parse_transcript_html(path: Path) -> tuple[str, list[dict]]:
+    """(title, paragraphs-ready-for-the-template) parsed from a saved file."""
+    parser = _TranscriptDOMParser()
+    parser.feed(path.read_text(encoding="utf-8"))
+    parser.close()
+    paragraphs: list[dict] = []
+    prev_speaker = None
+    for p in parser.paragraphs:
+        speaker = " ".join(p["speaker"].split()) or "Speaker 1"
+        words = p["words"]
+        text = " ".join(w["word"] for w in words) if words else p["text"]
+        if not text:
+            continue
+        paragraphs.append({
+            "speaker": speaker,
+            "original": p["original"] or speaker,
+            "start": p["start"],
+            "end": p["start"],
+            "text": text,
+            "words": words,
+            "cont": prev_speaker == speaker,
+            "bookmarked": p["bookmarked"],
+            "start_label": format_timestamp(p["start"]),
+        })
+        prev_speaker = speaker
+    return " ".join(parser.title.split()), paragraphs
+
+
 def rebuild_library() -> Path:
     entries = []
     td = transcripts_dir()
@@ -1045,6 +1144,38 @@ class Api:
             rebuild_library()
         except Exception:
             pass
+
+    # Called by the ⟳ buttons in library.html. Re-renders an existing
+    # transcript through the CURRENT template, preserving the user's edits
+    # (text, speaker names, bookmarks, splits) parsed out of the saved DOM.
+    # This is how viewer upgrades reach transcripts generated before them.
+    # Keeps transcribed_at (library order) and segments.json untouched;
+    # backs the old file up to .bak. Returns "" on failure, leaving the
+    # original file as it was.
+    def refresh_transcript(self, folder: str) -> str:
+        base = transcripts_dir().resolve()
+        path = (base / folder).resolve()
+        html_path = path / "transcript.html"
+        sidecar = path / f"transcript{META_SUFFIX}"
+        if not (str(path).startswith(str(base))
+                and html_path.exists() and sidecar.exists()):
+            return ""
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            title, paragraphs = parse_transcript_html(html_path)
+            if not paragraphs:
+                return ""
+            if title:
+                meta["title"] = title
+            template = jinja_env().get_template("transcript.html")
+            html = template.render(meta=meta, paragraphs=paragraphs,
+                                   css=read_css())
+            shutil.copy2(html_path, html_path.with_name(html_path.name + ".bak"))
+            html_path.write_text(html, encoding="utf-8")
+            sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            return html_path.as_uri()
+        except Exception:
+            return ""
 
     # Called by the rename (pencil) button in library.html. Updates the
     # display title in the sidecar (which the library reads) and inside
