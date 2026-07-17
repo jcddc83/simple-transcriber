@@ -1,6 +1,6 @@
 # Simple Transcriber for Podcasts & Videos
 
-**[Scroll.ai](https://www.scroll.ai/) shuts down June 12, 2026.** Simple Transcriber is a free,
+**[Scroll.ai](https://www.scroll.ai/) shut down June 12, 2026.** Simple Transcriber is a free,
 open-source desktop alternative — paste a YouTube link, a podcast URL, or upload a
 local audio/video file and get back a speaker-labeled, audio-synced HTML transcript
 you can read, edit, and quote from.
