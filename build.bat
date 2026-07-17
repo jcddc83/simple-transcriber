@@ -37,8 +37,8 @@ python -m PyInstaller --onefile --windowed --name SimpleTranscriber ^
   --add-data "static;static" ^
   --add-binary "ffmpeg.exe;." ^
   --add-binary "ffprobe.exe;." ^
-  --collect-all pywebview ^
-  --hidden-import pywebview.platforms.edgechromium ^
+  --collect-all webview ^
+  --hidden-import webview.platforms.edgechromium ^
   transcribe.py
 if errorlevel 1 goto :err
 
