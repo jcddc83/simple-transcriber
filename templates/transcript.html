@@ -3,15 +3,16 @@
 <head>
 <meta charset="utf-8">
 <title>{{ meta.title }}</title>
-<style>{{ css }}</style>
+{# `safe`: this is our own stylesheet — autoescaping corrupts quoted CSS
+   values (font names, content strings) into &#34;/&#39; entities. #}
+<style>{{ css | safe }}</style>
 </head>
 <body>
 <nav class="topnav">
   <a class="nav-primary" href="../index.html">← Back to Library</a>
   <button id="nav-home" style="display:none">⌂ Home</button>
   <button id="reset-speakers" title="Revert all speaker labels to their original names">Reset speakers</button>
-  <button id="export-txt" title="Download transcript as plain text file">↓ Export .txt</button>
-  <button id="export-md" title="Download transcript as Markdown file">↓ Export .md</button>
+  <button id="export-btn" title="Download transcript (.txt, .md, .srt, .vtt)">↓ Export</button>
   <button id="copy-all" style="margin-left:auto" title="Copy full transcript to clipboard">⎘ Copy transcript</button>
 </nav>
 <div id="find-bar" hidden>
@@ -19,7 +20,13 @@
   <span id="find-count"></span>
   <button id="find-prev" title="Previous match (Shift+Enter)">↑</button>
   <button id="find-next" title="Next match (Enter)">↓</button>
+  <button id="find-replace-toggle" title="Find and replace (Ctrl+H)">⇄</button>
   <button id="find-close" title="Close (Escape)">✕</button>
+  <div id="replace-row" hidden>
+    <input id="replace-input" type="text" placeholder="Replace with…" autocomplete="off" spellcheck="false">
+    <button id="replace-one" title="Replace the current match">Replace</button>
+    <button id="replace-all-btn" title="Replace every match">Replace all</button>
+  </div>
 </div>
 <main class="transcript">
   <section id="saved-quotes" hidden>
@@ -43,15 +50,15 @@
 
   <section class="paragraphs">
     {% for p in paragraphs %}
-    <article class="paragraph" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
+    <article class="paragraph{{ ' cont' if p.cont }}{{ ' bookmarked' if p.bookmarked }}" id="para-{{ '%.3f'|format(p.start) }}" data-start="{{ '%.3f'|format(p.start) }}">
       <button class="play" title="Play paragraph" aria-label="Play paragraph">▶</button>
       <div class="head">
-        <span class="speaker" data-original="{{ p.speaker }}" title="Click to rename this speaker">{{ p.speaker }}</span>
+        <span class="speaker" data-original="{{ p.original or p.speaker }}" title="Click to choose or rename this speaker">{{ p.speaker }}</span>
         <span class="ts">{{ p.start_label }}</span>
         <button class="bookmark" title="Bookmark this paragraph">☆</button>
         <button class="copy-quote" title="Copy quote with speaker and timestamp">⎘</button>
       </div>
-      <p class="text" contenteditable="true" spellcheck="false" title="Shift+click a word to split this paragraph at that word.">{% if p.words %}{% for w in p.words %}<span class="word" data-start="{{ '%.3f'|format(w.start) }}">{{ w.word }}</span> {% endfor %}{% else %}{{ p.text }}{% endif %}</p>
+      <p class="text" contenteditable="true" spellcheck="false" title="Right-click to split this paragraph or change its speaker.">{% if p.words %}{% for w in p.words %}<span class="word" data-start="{{ '%.3f'|format(w.start) }}">{{ w.word }}</span> {% endfor %}{% else %}{{ p.text }}{% endif %}</p>
     </article>
     {% endfor %}
   </section>
@@ -74,7 +81,7 @@
   <span id="cur" class="time">0:00</span>
   <input id="seek" type="range" min="0" max="0" step="0.1" value="0">
   <span id="dur" class="time">0:00</span>
-  <button id="save-btn" title="Save speaker label edits back to this file">Save edits</button>
+  <button id="save-btn" title="Edits autosave in the app; click to save immediately">Save edits</button>
 </footer>
 
 <button id="follow-pill" hidden>↓ Jump to now</button>
@@ -196,72 +203,96 @@ window.addEventListener('scroll', () => {
 
 followPill.addEventListener('click', reengageFollow);
 
-paragraphs.forEach((p) => {
-  p.querySelector('.play').addEventListener('click', () => {
-    audio.currentTime = parseFloat(p.dataset.start);
-    audio.play();
-    reengageFollow();
-  });
+// All per-paragraph bindings (play / text editing / copy-quote / speaker /
+// bookmark) live in wireParagraph() so paragraphs rendered at load and
+// paragraphs cloned by splitting share a single code path.
+paragraphs.forEach(wireParagraph);
+
+// Serialize the document for saving: work on a clone so runtime-only UI
+// (.runtime-ui) and transient playback/find state never reach the file.
+function serializeForSave() {
+  // The title's blur handler normally syncs <title>, but a save can fire
+  // while the h1 still has focus (autosave debounce, app close) — sync
+  // here so the sidecar/library never sees a stale title.
+  const t = document.getElementById('transcript-title').textContent.trim();
+  if (t) document.title = t;
+  const root = document.documentElement.cloneNode(true);
+  root.querySelectorAll('.runtime-ui').forEach(el => el.remove());
+  root.querySelectorAll('.active-word').forEach(el => el.classList.remove('active-word'));
+  root.querySelectorAll('.paragraph').forEach(p =>
+    p.classList.remove('active', 'find-match', 'find-match-active'));
+  return '<!doctype html>\n' + root.outerHTML;
+}
+
+// ---- Saving & autosave --------------------------------------------------
+// In the app (pywebview) edits autosave shortly after you stop changing
+// things, and pending edits are flushed before navigation and on app close.
+// In a plain browser there is no bridge, so saving stays manual.
+const saveBtn = document.getElementById('save-btn');
+let dirty = false;
+let saveTimer = null;
+let savePromise = null;
+
+function relTranscriptPath() {
+  const parts = location.pathname.split('/').map(p => decodeURIComponent(p));
+  const txIdx = parts.findIndex(p => p === 'Transcripts');
+  return txIdx >= 0 ? parts.slice(txIdx + 1).join('/') : parts[parts.length - 1];
+}
+
+function markDirty() {
+  dirty = true;
+  if (!window.pywebview) return;
+  saveBtn.textContent = 'Unsaved…';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(doSave, 2500);
+}
+
+async function doSave() {
+  if (!window.pywebview) return;
+  clearTimeout(saveTimer);
+  if (savePromise) await savePromise;
+  if (!dirty) return;
+  dirty = false;
+  saveBtn.textContent = 'Saving…';
+  savePromise = pywebview.api.save_transcript(serializeForSave(), relTranscriptPath())
+    .then(ok => { if (!ok) dirty = true; })
+    .catch(() => { dirty = true; });
+  await savePromise;
+  savePromise = null;
+  saveBtn.textContent = dirty ? 'Unsaved…' : 'Saved ✓';
+}
+
+// Flush pending edits whenever the window loses focus — this covers the
+// app being closed (the window blurs before it goes away) without any
+// Python-side hook into the close event, which would deadlock the UI
+// thread. doSave() is a no-op when nothing is dirty.
+window.addEventListener('blur', () => { doSave(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') doSave();
 });
 
-// Inline text editing: Enter commits/exits, don't allow line breaks within a paragraph
-document.querySelectorAll('.text').forEach(el => {
-  el.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
-  });
+// Text edits anywhere in the transcript body or title count as changes.
+document.querySelector('.paragraphs').addEventListener('input', markDirty);
+document.getElementById('transcript-title').addEventListener('input', markDirty);
+
+// Flush pending edits before leaving for the library.
+document.querySelector('.nav-primary').addEventListener('click', async e => {
+  if (!window.pywebview) return;
+  e.preventDefault();
+  const href = e.currentTarget.href;
+  await doSave();
+  window.location.href = href;
 });
 
-// Copy quote button: copies `"text" — Speaker [0:00]` to clipboard
-document.querySelectorAll('.copy-quote').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const para = btn.closest('.paragraph');
-    const text = para.querySelector('.text').textContent.trim();
-    const speaker = para.querySelector('.speaker').textContent.trim();
-    const ts = para.querySelector('.ts').textContent.trim();
-    const formatted = `"${text}" — ${speaker} [${ts}]`;
-    try {
-      await navigator.clipboard.writeText(formatted);
-      const orig = btn.textContent;
-      btn.textContent = '✓';
-      setTimeout(() => { btn.textContent = orig; }, 1200);
-    } catch (e) {
-      console.error('Copy failed', e);
-    }
-  });
-});
-
-// Speaker rename: click to rename just this label; confirm to rename all matching
-document.querySelectorAll('.speaker').forEach(el => {
-  el.style.cursor = 'pointer';
-  el.addEventListener('click', () => {
-    const oldName = el.textContent.trim();
-    const newName = prompt(`Rename this label:`, oldName);
-    if (!newName || !newName.trim() || newName.trim() === oldName) return;
-    el.textContent = newName.trim();
-    if (confirm(`Also rename all other "${oldName}" labels?`)) {
-      document.querySelectorAll('.speaker').forEach(s => {
-        if (s.textContent.trim() === oldName) s.textContent = newName.trim();
-      });
-    }
-  });
-});
-
-document.getElementById('save-btn').addEventListener('click', async () => {
-  const html = '<!doctype html>\n' + document.documentElement.outerHTML;
-  const btn = document.getElementById('save-btn');
-
+saveBtn.addEventListener('click', async () => {
   if (window.pywebview) {
-    const parts = location.pathname.split('/').map(p => decodeURIComponent(p));
-    const txIdx = parts.findIndex(p => p === 'Transcripts');
-    const relPath = txIdx >= 0 ? parts.slice(txIdx + 1).join('/') : parts[parts.length - 1];
-    await pywebview.api.save_transcript(html, relPath);
-    btn.textContent = 'Saved ✓';
-    setTimeout(() => { btn.textContent = 'Save edits'; }, 2000);
+    dirty = true;
+    await doSave();
     return;
   }
 
   // Browser fallback: file picker (Chrome/Edge) or plain download.
-  const blob = new Blob([html], { type: 'text/html' });
+  const blob = new Blob([serializeForSave()], { type: 'text/html' });
   if (window.showSaveFilePicker) {
     try {
       const handle = await window.showSaveFilePicker({
@@ -285,6 +316,7 @@ document.getElementById('save-btn').addEventListener('click', async () => {
   function initNav() {
     btn.style.display = '';
     btn.addEventListener('click', async () => {
+      await doSave();
       const url = await pywebview.api.show_home();
       window.location.href = url;
     });
@@ -308,6 +340,8 @@ document.getElementById('reset-speakers').addEventListener('click', () => {
   document.querySelectorAll('.speaker').forEach(el => {
     el.textContent = el.dataset.original;
   });
+  refreshContMarks();
+  markDirty();
 });
 
 // Copy full transcript to clipboard
@@ -330,6 +364,57 @@ document.getElementById('copy-all').addEventListener('click', async () => {
   }
 });
 
+// Subtitle timestamp: HH:MM:SS,mmm (srt) or HH:MM:SS.mmm (vtt)
+function fmtCueTime(t, sep) {
+  const ms = Math.max(0, Math.round(t * 1000));
+  const h = String(Math.floor(ms / 3600000)).padStart(2, '0');
+  const m = String(Math.floor(ms / 60000) % 60).padStart(2, '0');
+  const s = String(Math.floor(ms / 1000) % 60).padStart(2, '0');
+  return `${h}:${m}:${s}${sep}${String(ms % 1000).padStart(3, '0')}`;
+}
+
+// Build subtitle cues from the current DOM. Word spans give real timings;
+// cues cap at 12 words / 6 seconds and break early at pauses >= 0.8s.
+// Paragraphs without word spans become one cue at the paragraph start.
+function buildCues() {
+  const cues = [];
+  paragraphs.forEach(p => {
+    const speaker = p.querySelector('.speaker').textContent.trim();
+    const words = Array.from(p.querySelectorAll('.word'));
+    let first = true;
+    const push = (start, text, lastT) => {
+      cues.push({ start, text, speaker, first, lastT });
+      first = false;
+    };
+    if (!words.length) {
+      const text = p.querySelector('.text').textContent.trim();
+      const t = parseFloat(p.dataset.start) || 0;
+      if (text) push(t, text, t);
+      return;
+    }
+    let start = null, toks = [], lastT = 0;
+    words.forEach(w => {
+      const token = w.textContent.trim();
+      if (!token) return;
+      const t = parseFloat(w.dataset.start) || 0;
+      if (start !== null && (toks.length >= 12 || t - start >= 6 || t - lastT >= 0.8)) {
+        push(start, toks.join(' '), lastT);
+        start = null; toks = [];
+      }
+      if (start === null) start = t;
+      toks.push(token); lastT = t;
+    });
+    if (toks.length) push(start, toks.join(' '), lastT);
+  });
+  cues.forEach((c, i) => {
+    const next = cues[i + 1];
+    const end = next ? next.start - 0.05
+      : (isFinite(audio.duration) ? audio.duration : c.lastT + 4);
+    c.end = Math.max(end, c.start + 0.5);
+  });
+  return cues;
+}
+
 // Shared helper: build export content from current DOM state
 function buildExportContent(format) {
   const title = document.getElementById('transcript-title').textContent.trim();
@@ -339,6 +424,25 @@ function buildExportContent(format) {
   const url = metaRow.querySelector('.original')?.href || '';
   const safe = title.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'transcript';
 
+  let content, mimeType, filename;
+  if (format === 'srt') {
+    content = buildCues().map((c, i) =>
+      `${i + 1}\n${fmtCueTime(c.start, ',')} --> ${fmtCueTime(c.end, ',')}\n` +
+      `${c.first ? c.speaker + ': ' : ''}${c.text}`
+    ).join('\n\n') + '\n';
+    mimeType = 'application/x-subrip';
+    filename = safe + '.srt';
+    return { content, mimeType, filename };
+  }
+  if (format === 'vtt') {
+    content = 'WEBVTT\n\n' + buildCues().map(c =>
+      `${fmtCueTime(c.start, '.')} --> ${fmtCueTime(c.end, '.')}\n<v ${c.speaker}>${c.text}`
+    ).join('\n\n') + '\n';
+    mimeType = 'text/vtt';
+    filename = safe + '.vtt';
+    return { content, mimeType, filename };
+  }
+
   const body = paragraphs.map(p => {
     const speaker = p.querySelector('.speaker').textContent.trim();
     const ts = p.querySelector('.ts').textContent.trim();
@@ -346,7 +450,6 @@ function buildExportContent(format) {
     return format === 'md' ? `**${speaker}** [${ts}]\n${text}` : `${speaker} [${ts}]\n${text}`;
   }).join('\n\n');
 
-  let content, mimeType, filename;
   if (format === 'md') {
     const meta = [channel, date].filter(Boolean).join(' · ');
     const hdr = `# ${title}\n${meta}${meta && url ? ' | ' : ''}${url ? `[Original](${url})` : ''}\n\n---`;
@@ -362,11 +465,18 @@ function buildExportContent(format) {
   return { content, mimeType, filename };
 }
 
-// Export as .txt or .md — opens save dialog when available, falls back to download
+const EXPORT_KINDS = {
+  txt: 'Text file',
+  md: 'Markdown file',
+  srt: 'SubRip subtitles',
+  vtt: 'WebVTT subtitles',
+};
+
+// Export — opens save dialog when available, falls back to download
 async function exportTranscript(format) {
   const { content, mimeType, filename } = buildExportContent(format);
   const blob = new Blob([content], { type: mimeType });
-  const description = format === 'md' ? 'Markdown file' : 'Text file';
+  const description = EXPORT_KINDS[format] || 'File';
   const ext = '.' + format;
   if (window.showSaveFilePicker) {
     try {
@@ -385,48 +495,198 @@ async function exportTranscript(format) {
   fallbackDownload(blob, filename);
 }
 
-document.getElementById('export-txt').addEventListener('click', () => exportTranscript('txt'));
-document.getElementById('export-md').addEventListener('click',  () => exportTranscript('md'));
+document.getElementById('export-btn').addEventListener('click', e => {
+  const r = e.currentTarget.getBoundingClientRect();
+  showMenu([
+    { label: 'Plain text (.txt)', action: () => exportTranscript('txt') },
+    { label: 'Markdown (.md)', action: () => exportTranscript('md') },
+    { label: 'Subtitles (.srt)', action: () => exportTranscript('srt') },
+    { label: 'Subtitles (.vtt)', action: () => exportTranscript('vtt') },
+  ], r.left, r.bottom + 4);
+});
 
-// In-page find (Ctrl+F / Cmd+F) — highlights matching paragraphs, steps through them.
-// Operates on .paragraph elements so word spans used for playback are never disturbed.
+// In-page find (Ctrl+F / Cmd+F). Where the CSS Custom Highlight API is
+// available (WebView2/Chromium 105+, WKWebView/Safari 17.2+) the exact
+// matched text is highlighted via Ranges — zero DOM mutation, so the
+// .word spans that drive playback are untouched and nothing leaks into
+// saved files. Engines without the API keep the old behavior of
+// highlighting whole matching paragraphs.
 (function initFind() {
   const bar      = document.getElementById('find-bar');
   const input    = document.getElementById('find-input');
   const countEl  = document.getElementById('find-count');
+  const useHl    = typeof Highlight !== 'undefined' && CSS.highlights;
+  // useHl: [{range, para}]  —  fallback: [para]
   let matches = [], current = -1;
 
   function clearHighlights() {
-    matches.forEach(p => p.classList.remove('find-match', 'find-match-active'));
+    if (useHl) {
+      CSS.highlights.delete('find-hl');
+      CSS.highlights.delete('find-hl-active');
+    }
+    document.querySelectorAll('.find-match, .find-match-active').forEach(p =>
+      p.classList.remove('find-match', 'find-match-active'));
     matches = []; current = -1; countEl.textContent = '';
   }
 
   function showCurrent() {
-    matches.forEach((p, i) =>
-      p.classList.toggle('find-match-active', i === current));
     countEl.textContent = matches.length ? `${current + 1} / ${matches.length}` : '';
-    if (matches[current]) matches[current].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (!matches.length) return;
+    if (useHl) {
+      CSS.highlights.set('find-hl-active', new Highlight(matches[current].range));
+      matches[current].para.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else {
+      matches.forEach((p, i) => p.classList.toggle('find-match-active', i === current));
+      matches[current].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  // All matches of `lower` inside one .text as Ranges, spanning word spans
+  // and whitespace freely (also matches inside a single word).
+  function findRangesIn(textEl, lower) {
+    const nodes = [];
+    const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
+    let full = '', n;
+    while ((n = walker.nextNode())) {
+      nodes.push({ node: n, start: full.length });
+      full += n.textContent;
+    }
+    const ranges = [];
+    const fullLower = full.toLowerCase();
+    let idx = fullLower.indexOf(lower);
+    if (idx === -1) return ranges;
+
+    // A start offset on a node boundary resolves to the FOLLOWING node
+    // (strict <), an end offset to the preceding one (<=) — so a match
+    // covering exactly one word span yields a single-node Range, which
+    // replace relies on.
+    function locate(offset, isEnd) {
+      for (const { node, start } of nodes) {
+        const len = node.textContent.length;
+        if (isEnd ? offset <= start + len : offset < start + len) {
+          return [node, offset - start];
+        }
+      }
+      const last = nodes[nodes.length - 1];
+      return [last.node, last.node.textContent.length];
+    }
+
+    while (idx !== -1) {
+      const r = new Range();
+      r.setStart(...locate(idx, false));
+      r.setEnd(...locate(idx + lower.length, true));
+      ranges.push(r);
+      idx = fullLower.indexOf(lower, idx + lower.length);
+    }
+    return ranges;
   }
 
   function runFind(q) {
     clearHighlights();
     if (!q) return;
     const lower = q.toLowerCase();
-    document.querySelectorAll('.paragraph').forEach(p => {
-      if (p.querySelector('.text').textContent.toLowerCase().includes(lower)) {
-        p.classList.add('find-match');
-        matches.push(p);
+    if (useHl) {
+      document.querySelectorAll('.paragraph .text').forEach(textEl => {
+        const para = textEl.closest('.paragraph');
+        findRangesIn(textEl, lower).forEach(range => matches.push({ range, para }));
+      });
+      if (matches.length) {
+        CSS.highlights.set('find-hl', new Highlight(...matches.map(m => m.range)));
       }
-    });
+    } else {
+      document.querySelectorAll('.paragraph').forEach(p => {
+        if (p.querySelector('.text').textContent.toLowerCase().includes(lower)) {
+          p.classList.add('find-match');
+          matches.push(p);
+        }
+      });
+    }
     if (matches.length) { current = 0; showCurrent(); }
     else countEl.textContent = 'No matches';
   }
 
+  // Edits invalidate live Ranges — re-run the current search shortly after
+  // typing stops while the find bar is open.
+  let refindTimer = null;
+  document.querySelector('.paragraphs').addEventListener('input', () => {
+    if (bar.hidden || !input.value.trim()) return;
+    clearTimeout(refindTimer);
+    refindTimer = setTimeout(() => runFind(input.value.trim()), 300);
+  });
+
+  // ---- Replace (needs the Highlight API's Ranges; hidden on fallback) ----
+  const replaceRow    = document.getElementById('replace-row');
+  const replaceInput  = document.getElementById('replace-input');
+  const replaceToggle = document.getElementById('find-replace-toggle');
+  if (!useHl) replaceToggle.hidden = true;
+
+  function replaceMatch(m, replacement) {
+    const r = m.range;
+    try {
+      // Fast path: match within one text node (single word or plain text)
+      // — splice in place, keeping the word span and its timing intact.
+      if (r.startContainer === r.endContainer &&
+          r.startContainer.nodeType === Node.TEXT_NODE) {
+        const node = r.startContainer;
+        node.textContent = node.textContent.slice(0, r.startOffset) + replacement +
+                           node.textContent.slice(r.endOffset);
+        return true;
+      }
+      // Phrase spanning word spans: delete the matched range and insert the
+      // replacement as plain text. The replacement itself loses per-word
+      // karaoke timing (unavoidable — the original words are gone), but all
+      // surrounding word spans keep theirs.
+      const text = m.para.querySelector('.text');
+      r.deleteContents();
+      r.insertNode(document.createTextNode(replacement));
+      // deleteContents can leave word spans it fully emptied; drop them.
+      text.querySelectorAll('.word').forEach(w => {
+        if (!w.textContent) w.remove();
+      });
+      text.normalize();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function doReplace(all) {
+    if (!useHl || !matches.length) return;
+    const q = input.value.trim();
+    const replacement = replaceInput.value;
+    let replaced = 0, failed = 0;
+    // Reverse document order: earlier live Ranges are unaffected by edits
+    // made after them.
+    const targets = all ? matches.slice().reverse()
+                        : (matches[current] ? [matches[current]] : []);
+    targets.forEach(m => replaceMatch(m, replacement) ? replaced++ : failed++);
+    if (replaced) markDirty();
+    runFind(q);
+    countEl.textContent = `Replaced ${replaced}` +
+      (failed ? ` (${failed} failed)` : '') +
+      (matches.length ? ` · ${matches.length} left` : '');
+  }
+
+  replaceToggle.addEventListener('click', () => {
+    replaceRow.hidden = !replaceRow.hidden;
+    if (!replaceRow.hidden) replaceInput.focus();
+  });
+  document.getElementById('replace-one').addEventListener('click', () => doReplace(false));
+  document.getElementById('replace-all-btn').addEventListener('click', () => doReplace(true));
+  replaceInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); doReplace(e.shiftKey); }
+  });
+
   function openBar()  { bar.hidden = false; input.focus(); input.select(); }
-  function closeBar() { bar.hidden = true; clearHighlights(); input.value = ''; }
+  function closeBar() { bar.hidden = true; replaceRow.hidden = true; clearHighlights(); input.value = ''; }
 
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openBar(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'h' && useHl) {
+      e.preventDefault();
+      openBar();
+      replaceRow.hidden = false;
+    }
     if (e.key === 'Escape' && !bar.hidden) closeBar();
   });
 
@@ -490,19 +750,6 @@ function syncSavedQuotes() {
   sqSection.hidden = marked.length === 0;
 }
 
-document.querySelectorAll('.bookmark').forEach(btn => {
-  // Restore filled star if paragraph already bookmarked (from saved HTML)
-  if (btn.closest('.paragraph').classList.contains('bookmarked')) btn.textContent = '★';
-  btn.addEventListener('click', e => {
-    e.stopPropagation();
-    const para = btn.closest('.paragraph');
-    const now = !para.classList.contains('bookmarked');
-    para.classList.toggle('bookmarked', now);
-    btn.textContent = now ? '★' : '☆';
-    syncSavedQuotes();
-  });
-});
-
 syncSavedQuotes();
 
 function fallbackDownload(blob, filename) {
@@ -513,11 +760,205 @@ function fallbackDownload(blob, filename) {
 }
 
 // ---------------------------------------------------------------------
+// Popup menus (speaker picker + paragraph context menu).
+// Runtime-only UI: carries .runtime-ui so serializeForSave() strips it,
+// and it is removed from the DOM whenever it closes.
+// ---------------------------------------------------------------------
+
+let openMenu = null;
+
+function closeMenu() {
+  if (openMenu) { openMenu.remove(); openMenu = null; }
+}
+
+// items: array of {label, action, checked} or '-' for a separator.
+function showMenu(items, x, y) {
+  closeMenu();
+  const menu = document.createElement('div');
+  menu.className = 'popup-menu runtime-ui';
+  items.forEach(it => {
+    if (it === '-') {
+      const sep = document.createElement('div');
+      sep.className = 'menu-sep';
+      menu.appendChild(sep);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'menu-item' + (it.checked ? ' checked' : '');
+    btn.textContent = it.label;
+    btn.addEventListener('click', () => { closeMenu(); it.action(); });
+    menu.appendChild(btn);
+  });
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+  openMenu = menu;
+}
+
+// Capture phase runs before the handler that opens a new menu, so a click
+// anywhere (including one that opens another menu) first closes this one.
+document.addEventListener('click', e => {
+  if (openMenu && !openMenu.contains(e.target)) closeMenu();
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+
+// ---------------------------------------------------------------------
+// Speakers: every label is picked from / added to the transcript's own
+// speaker list, so assigning an existing speaker never risks a typo.
+// ---------------------------------------------------------------------
+
+function allSpeakerNames() {
+  const names = [];
+  document.querySelectorAll('.speaker').forEach(s => {
+    const n = s.textContent.trim();
+    if (n && !names.includes(n)) names.push(n);
+  });
+  return names;
+}
+
+// A .cont paragraph continues the same speaker as the one above and gets
+// a de-emphasized label. Recompute after anything that changes labels or
+// paragraph order so the dimming stays truthful.
+function refreshContMarks() {
+  let prevName = null;
+  document.querySelectorAll('.paragraph').forEach(p => {
+    const name = p.querySelector('.speaker')?.textContent.trim() || '';
+    p.classList.toggle('cont', !!prevName && prevName === name);
+    prevName = name;
+  });
+}
+
+function setSpeaker(el, name) {
+  el.textContent = name;
+  refreshContMarks();
+  syncSavedQuotes();
+  markDirty();
+}
+
+function renameSpeakerEverywhere(oldName, newName) {
+  document.querySelectorAll('.speaker').forEach(s => {
+    if (s.textContent.trim() === oldName) s.textContent = newName;
+  });
+  refreshContMarks();
+  syncSavedQuotes();
+  markDirty();
+}
+
+function openSpeakerMenu(sp, x, y) {
+  const current = sp.textContent.trim();
+  const items = allSpeakerNames().map(name => ({
+    label: name,
+    checked: name === current,
+    action: () => { if (name !== current) setSpeaker(sp, name); },
+  }));
+  items.push('-');
+  items.push({ label: 'New speaker…', action: () => {
+    const n = prompt('New speaker name:', '');
+    if (n && n.trim()) setSpeaker(sp, n.trim());
+  }});
+  items.push({ label: `Rename "${current}" everywhere…`, action: () => {
+    const n = prompt(`Rename all "${current}" labels to:`, current);
+    if (n && n.trim() && n.trim() !== current) renameSpeakerEverywhere(current, n.trim());
+  }});
+  showMenu(items, x, y);
+}
+
+// ---------------------------------------------------------------------
 // Split a paragraph when one mis-attributes two speakers.
-// Shift+click any word: that word becomes the first word of a new
-// paragraph below, labeled "Speaker ?" until the user renames it.
+// Right-click (or Ctrl+Enter at the caret, or Shift+click a word): the
+// chosen word becomes the first word of a new paragraph below, labeled
+// "Speaker ?" until the user assigns a speaker.
 // Bookmarks propagate to both halves.
 // ---------------------------------------------------------------------
+
+// Resolve a DOM node to the .word span the action should target. A node
+// in the whitespace between words snaps to the next word, so the action
+// never silently misses.
+function wordFromNode(node, sourceText) {
+  if (!node) return null;
+  const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const w = el && el.closest ? el.closest('.word') : null;
+  if (w) return w;
+  if (node.nodeType === Node.TEXT_NODE && node.parentNode === sourceText) {
+    let n = node.nextSibling;
+    while (n && !(n.nodeType === Node.ELEMENT_NODE && n.classList.contains('word'))) {
+      n = n.nextSibling;
+    }
+    return n;
+  }
+  return null;
+}
+
+function wordAtPoint(x, y, sourceText) {
+  let node = null;
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    if (r) node = r.startContainer;
+  } else if (document.caretPositionFromPoint) {
+    const pos = document.caretPositionFromPoint(x, y);
+    if (pos) node = pos.offsetNode;
+  }
+  return wordFromNode(node, sourceText);
+}
+
+// Splitting at the first word would move the whole text and leave the
+// original paragraph empty.
+function canSplitAt(sourceText, word) {
+  if (!word || word.parentNode !== sourceText) return false;
+  return word !== sourceText.querySelector('.word');
+}
+
+// Inverse of splitParagraphAt: fold this paragraph's text into the one
+// above it, keeping the earlier start time. Bookmarks survive on the
+// merged result.
+function mergeWithPrevious(para) {
+  const prev = para.previousElementSibling;
+  if (!prev || !prev.classList.contains('paragraph')) return;
+  const prevText = prev.querySelector('.text');
+  const text = para.querySelector('.text');
+  if (!prevText || !text) return;
+  prevText.appendChild(document.createTextNode(' '));
+  while (text.firstChild) prevText.appendChild(text.firstChild);
+  if (para.classList.contains('bookmarked')) {
+    prev.classList.add('bookmarked');
+    const bm = prev.querySelector('.bookmark');
+    if (bm) bm.textContent = '★';
+  }
+  para.remove();
+  paragraphs = Array.from(document.querySelectorAll('.paragraph'));
+  refreshContMarks();
+  syncSavedQuotes();
+  markDirty();
+}
+
+// Right-click inside a paragraph: split at that word, merge upward,
+// and/or reassign the paragraph's speaker.
+document.addEventListener('contextmenu', e => {
+  const text = e.target.closest && e.target.closest('.text');
+  if (!text) return;
+  const para = text.closest('.paragraph');
+  if (!para) return;
+  e.preventDefault();
+  const items = [];
+  const word = wordAtPoint(e.clientX, e.clientY, text);
+  if (canSplitAt(text, word)) {
+    items.push({ label: '✂ Split paragraph here', action: () => splitParagraphAt(para, word) });
+  }
+  const prevPara = para.previousElementSibling;
+  if (prevPara && prevPara.classList.contains('paragraph')) {
+    items.push({ label: '⇧ Merge with paragraph above', action: () => mergeWithPrevious(para) });
+  }
+  const sp = para.querySelector('.speaker');
+  if (sp) {
+    const current = sp.textContent.trim();
+    const others = allSpeakerNames().filter(n => n !== current);
+    if (items.length && others.length) items.push('-');
+    others.forEach(name =>
+      items.push({ label: `Assign to ${name}`, action: () => setSpeaker(sp, name) }));
+  }
+  if (items.length) showMenu(items, e.clientX, e.clientY);
+});
 
 function uniqueParaId(base) {
   if (!document.getElementById(base)) return base;
@@ -526,9 +967,9 @@ function uniqueParaId(base) {
   return `${base}_${n}`;
 }
 
-// Mirrors the per-element bindings declared earlier (play / text keydown
-// / copy-quote / speaker rename / bookmark) so a freshly cloned paragraph
-// behaves identically to one rendered at page load.
+// Single source of per-paragraph bindings (play / text keydown /
+// copy-quote / speaker rename / bookmark), used for paragraphs rendered
+// at page load and for paragraphs cloned by splitting.
 function wireParagraph(p) {
   const play = p.querySelector('.play');
   if (play) play.addEventListener('click', () => {
@@ -538,7 +979,16 @@ function wireParagraph(p) {
   });
   const text = p.querySelector('.text');
   if (text) text.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); text.blur(); }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl+Enter: split this paragraph at the word holding the caret.
+      const sel = window.getSelection();
+      const word = sel && wordFromNode(sel.anchorNode, text);
+      if (canSplitAt(text, word)) { text.blur(); splitParagraphAt(p, word); }
+      return;
+    }
+    text.blur();
   });
   const cq = p.querySelector('.copy-quote');
   if (cq) cq.addEventListener('click', async () => {
@@ -555,17 +1005,7 @@ function wireParagraph(p) {
   const sp = p.querySelector('.speaker');
   if (sp) {
     sp.style.cursor = 'pointer';
-    sp.addEventListener('click', () => {
-      const oldName = sp.textContent.trim();
-      const newName = prompt('Rename this label:', oldName);
-      if (!newName || !newName.trim() || newName.trim() === oldName) return;
-      sp.textContent = newName.trim();
-      if (confirm(`Also rename all other "${oldName}" labels?`)) {
-        document.querySelectorAll('.speaker').forEach(s => {
-          if (s.textContent.trim() === oldName) s.textContent = newName.trim();
-        });
-      }
-    });
+    sp.addEventListener('click', e => openSpeakerMenu(sp, e.clientX, e.clientY));
   }
   const bm = p.querySelector('.bookmark');
   if (bm) {
@@ -576,6 +1016,7 @@ function wireParagraph(p) {
       p.classList.toggle('bookmarked', now);
       bm.textContent = now ? '★' : '☆';
       syncSavedQuotes();
+      markDirty();
     });
   }
 }
@@ -601,11 +1042,12 @@ function splitParagraphAt(para, word) {
 
   const head = document.createElement('div');
   head.className = 'head';
-  const origSpeaker = para.querySelector('.speaker');
   const spk = document.createElement('span');
   spk.className = 'speaker';
-  spk.dataset.original = origSpeaker ? (origSpeaker.dataset.original || '') : '';
-  spk.title = 'Click to rename this speaker';
+  // The split half starts unattributed, so "Reset speakers" must restore
+  // "Speaker ?" — not the source paragraph's original speaker.
+  spk.dataset.original = 'Speaker ?';
+  spk.title = 'Click to choose a speaker';
   spk.textContent = 'Speaker ?';
   head.appendChild(spk);
   const tsEl = document.createElement('span');
@@ -628,7 +1070,7 @@ function splitParagraphAt(para, word) {
   newText.className = 'text';
   newText.setAttribute('contenteditable', 'true');
   newText.setAttribute('spellcheck', 'false');
-  newText.setAttribute('title', 'Shift+click a word to split this paragraph at that word.');
+  newText.setAttribute('title', 'Right-click to split this paragraph or change its speaker.');
 
   // Move the clicked word and every sibling that follows it (words plus
   // the whitespace text nodes between them) into the new .text.
@@ -656,26 +1098,22 @@ function splitParagraphAt(para, word) {
 
   wireParagraph(clone);
   paragraphs = Array.from(document.querySelectorAll('.paragraph'));
+  refreshContMarks();
   syncSavedQuotes();
+  markDirty();
 }
 
 document.addEventListener('click', (e) => {
   if (!e.shiftKey) return;
-  const word = e.target.closest && e.target.closest('.word');
-  if (!word) return;
-  const para = word.closest('.paragraph');
+  const para = e.target.closest && e.target.closest('.paragraph');
   if (!para) return;
   const sourceText = para.querySelector('.text');
-  if (!sourceText || word.parentNode !== sourceText) return;
-  const allWords = sourceText.querySelectorAll('.word');
-  // First word: nothing to split (would leave an empty paragraph above).
-  // Last word: would leave the original paragraph empty.
-  if (word === allWords[0] || word === allWords[allWords.length - 1]) {
-    e.preventDefault();
-    return;
-  }
+  if (!sourceText || !sourceText.contains(e.target)) return;
+  // Snap clicks that land between words to the next word instead of
+  // silently doing nothing.
+  const word = wordAtPoint(e.clientX, e.clientY, sourceText);
   e.preventDefault();
-  splitParagraphAt(para, word);
+  if (canSplitAt(sourceText, word)) splitParagraphAt(para, word);
 });
 </script>
 </body>

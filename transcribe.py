@@ -21,11 +21,17 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.utils import parsedate_to_datetime
+from html import escape as html_escape, unescape as html_unescape
+from html.parser import HTMLParser
 from pathlib import Path
 
 import assemblyai as aai
@@ -40,6 +46,70 @@ GROQ_MODEL = "whisper-large-v3"
 GROQ_MAX_BYTES = 25 * 1024 * 1024  # 25MB free-tier limit
 AUDIO_BITRATE_KBPS = 32  # mono mp3 ~ 14MB/hour at this bitrate
 CHUNK_MINUTES = 20  # used only if encoded audio still exceeds GROQ_MAX_BYTES
+
+# Paragraph breaking within a single speaker turn (group_segments_by_speaker).
+PARA_PAUSE_SECONDS = 1.75  # a pause this long between segments starts a new paragraph
+PARA_SOFT_CHARS = 550  # past this, break at the next sentence-ending segment
+PARA_HARD_CHARS = 900  # past this, break at the next segment boundary regardless
+
+# Stage weights for the transcription progress bar, normalized per run over
+# the stages that actually apply (local files skip "download").
+PROGRESS_STAGES = {
+    "download": 0.15,
+    "encode": 0.10,
+    "transcribe": 0.30,
+    "diarize": 0.40,
+    "render": 0.05,
+}
+GROQ_REALTIME_RATIO = 0.03  # Groq whisper-large-v3 ≈ 3% of realtime (tunable)
+AAI_REALTIME_RATIO = 0.25  # AssemblyAI diarization ≈ 25% of realtime (tunable)
+
+
+class _Progress:
+    """Weighted multi-stage progress feeding the shell's bar.
+
+    Stages are declared up front so weights normalize to 100% even when a
+    stage doesn't apply. Fractions passed with estimated=True come from
+    elapsed-time guesses (Groq intra-chunk, AssemblyAI fill) and render
+    with a pulsing style and "~" label; everything else is driven by real
+    signals (yt-dlp bytes, ffmpeg out_time, chunk boundaries, AssemblyAI
+    status transitions).
+    """
+
+    def __init__(self, emit, stages: list[str]) -> None:
+        total = sum(PROGRESS_STAGES.get(s, 0.0) for s in stages) or 1.0
+        self._weights = {s: PROGRESS_STAGES.get(s, 0.0) / total for s in stages}
+        self._emit = emit
+        self._done = 0.0  # weight of completed stages
+        self._weight = 0.0  # weight of the active stage
+        self._frac = 0.0  # progress within the active stage
+
+    def stage(self, name: str) -> None:
+        self._done += self._weight
+        self._weight = self._weights.get(name, 0.0)
+        self._frac = 0.0
+        self._send(False)
+
+    def update(self, fraction: float, estimated: bool = False) -> None:
+        self._frac = max(0.0, min(1.0, fraction))
+        self._send(estimated)
+
+    def finish(self) -> None:
+        self._done, self._weight, self._frac = 1.0, 0.0, 0.0
+        self._send(False)
+
+    def _send(self, estimated: bool) -> None:
+        overall = round((self._done + self._weight * self._frac) * 100)
+        self._emit({"overall": overall, "estimated": estimated})
+
+
+class _NullProgress:
+    def stage(self, name: str) -> None: ...
+    def update(self, fraction: float, estimated: bool = False) -> None: ...
+    def finish(self) -> None: ...
+
+
+_NULL_PROGRESS = _NullProgress()
 
 
 # ---------------------------------------------------------------------------
@@ -217,9 +287,232 @@ def _ffmpeg_location() -> str | None:
     return str(d) if (d / exe).exists() else None
 
 
-def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
+def _run_ffmpeg(args: list[str], duration: float | None = None,
+                on_progress=None) -> None:
+    """Run ffmpeg. With duration + on_progress, parse `-progress` output and
+    report the fraction of the input processed. Captures stderr either way
+    so a failure surfaces ffmpeg's actual error instead of a silent code."""
+    cmd = [ffmpeg_exe(), "-y"]
+    track = bool(on_progress and duration)
+    if track:
+        cmd += ["-progress", "pipe:1", "-nostats", "-loglevel", "error"]
+    cmd += args
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE if track else subprocess.DEVNULL,
+        stderr=subprocess.PIPE, text=True, creationflags=_NO_WINDOW,
+    )
+    if track:
+        for line in proc.stdout:
+            # ffmpeg quirk: out_time_ms is microseconds, not milliseconds.
+            if line.startswith("out_time_ms="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    on_progress(min(1.0, us / 1_000_000 / duration))
+                except ValueError:
+                    pass
+    stderr = proc.communicate()[1] or ""
+    if proc.returncode != 0:
+        tail = stderr.strip().splitlines()
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd, stderr=tail[-1] if tail else ""
+        )
+
+
+def _media_duration(path: Path) -> float | None:
+    """Duration in seconds read from ffmpeg's header dump (no decode)."""
+    try:
+        proc = subprocess.run(
+            [ffmpeg_exe(), "-i", str(path)], capture_output=True, text=True,
+            creationflags=_NO_WINDOW,
+        )
+        m = re.search(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)", proc.stderr)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except OSError:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Open-podcast-ecosystem fallback.
+# Apple's episode pages currently error/block non-browser requests, and
+# Spotify's audio is DRM-protected (off-limits by design). Most shows on
+# both, however, publish the same episodes in an open RSS feed. These
+# helpers resolve a failing Apple/Spotify link to the episode's direct
+# enclosure URL via official, keyless metadata APIs — no page scraping,
+# no DRM involved.
+# ---------------------------------------------------------------------------
+
+_ITUNES_NS = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
+
+
+def _http_get_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "SimpleTranscriber"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_get_bytes(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "SimpleTranscriber"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
+def _norm_tokens(s: str) -> set[str]:
+    return {t for t in re.sub(r"[^a-z0-9]+", " ", s.lower()).split() if t}
+
+
+def _title_score(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def _parse_itunes_duration(s: str | None) -> int:
+    """itunes:duration is either plain seconds or H:MM:SS / M:SS."""
+    if not s:
+        return 0
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    try:
+        sec = 0
+        for part in s.split(":"):
+            sec = sec * 60 + int(part)
+        return sec
+    except ValueError:
+        return 0
+
+
+def _rfc2822_to_yyyymmdd(s: str) -> str:
+    try:
+        return parsedate_to_datetime(s).strftime("%Y%m%d")
+    except Exception:
+        return ""
+
+
+def resolve_apple_episode(url: str, status) -> tuple[str, dict]:
+    """Resolve an Apple Podcasts episode URL to (enclosure_url, meta_overrides)
+    via the iTunes Lookup API + the show's public RSS feed."""
+    m_show = re.search(r"/id(\d+)", url)
+    if not m_show:
+        raise RuntimeError("Could not find the show id in that Apple Podcasts URL.")
+    m_ep = re.search(r"[?&]i=(\d+)", url)
+    episode_id = m_ep.group(1) if m_ep else ""
+    m_slug = re.search(r"/podcast/([^/]+)/id\d+", url)
+    slug_tokens = _norm_tokens(m_slug.group(1)) if m_slug else set()
+
+    status("Apple blocked the page — using the show's RSS feed...")
+    lookup = _http_get_json(f"https://itunes.apple.com/lookup?id={m_show.group(1)}")
+    results = lookup.get("results") or []
+    feed_url = results[0].get("feedUrl") if results else None
+    if not feed_url:
+        raise RuntimeError("Apple's lookup API didn't return an RSS feed for this show.")
+    show_title = results[0].get("collectionName", "")
+
+    root = ET.fromstring(_http_get_bytes(feed_url))
+    candidates = []
+    for item in root.findall("./channel/item"):
+        title = (item.findtext("title") or "").strip()
+        enclosure = item.find("enclosure")
+        audio = enclosure.get("url") if enclosure is not None else None
+        if not title or not audio:
+            continue
+        candidates.append({
+            "title": title,
+            "audio": audio,
+            "ids": f'{item.findtext("guid") or ""} {item.findtext("link") or ""}',
+            "pub": item.findtext("pubDate") or "",
+            "dur": _parse_itunes_duration(item.findtext(f"{_ITUNES_NS}duration")),
+        })
+
+    match = next((c for c in candidates if episode_id and episode_id in c["ids"]), None)
+    if match is None and slug_tokens:
+        best = max(candidates, key=lambda c: _title_score(slug_tokens, _norm_tokens(c["title"])),
+                   default=None)
+        if best and _title_score(slug_tokens, _norm_tokens(best["title"])) >= 0.5:
+            match = best
+    if match is None:
+        raise RuntimeError(
+            "Found the show's RSS feed but couldn't identify this episode in it."
+        )
+    return match["audio"], {
+        "title": match["title"],
+        "channel": show_title,
+        "upload_date_raw": _rfc2822_to_yyyymmdd(match["pub"]),
+        "duration": match["dur"],
+    }
+
+
+def resolve_spotify_episode(url: str, status) -> tuple[str, dict]:
+    """Resolve a Spotify episode URL to (enclosure_url, meta_overrides).
+
+    Spotify's own audio is DRM-protected and not touched. The episode title
+    comes from Spotify's public oEmbed endpoint; Apple's keyless episode
+    search then locates the same episode in the show's open RSS feed.
+    Spotify-exclusive shows aren't in any public feed and get a plain
+    explanation instead of a cryptic DRM error."""
+    if "/episode/" not in url:
+        raise RuntimeError(
+            "That's a Spotify show link — paste a specific episode link "
+            "(open.spotify.com/episode/...) so it can be matched to the "
+            "show's public feed."
+        )
+    status("Spotify audio is DRM-protected — finding this episode's public feed...")
+    oembed = _http_get_json(
+        "https://open.spotify.com/oembed?url=" + urllib.parse.quote(url, safe="")
+    )
+    ep_title = (oembed.get("title") or "").strip()
+    if not ep_title:
+        raise RuntimeError("Couldn't read the episode title from Spotify.")
+
+    target = _norm_tokens(ep_title)
+    data = _http_get_json(
+        "https://itunes.apple.com/search?media=podcast&entity=podcastEpisode"
+        "&limit=25&term=" + urllib.parse.quote(ep_title)
+    )
+    best, best_score = None, 0.0
+    for r in data.get("results", []):
+        if not r.get("episodeUrl"):
+            continue
+        score = _title_score(target, _norm_tokens(r.get("trackName") or ""))
+        if score > best_score:
+            best, best_score = r, score
+    if best is None or best_score < 0.5:
+        raise RuntimeError(
+            "This episode wasn't found in the open podcast ecosystem — it may "
+            "be Spotify-exclusive. If you have access to the audio, download "
+            "it and use Upload file instead."
+        )
+    release = best.get("releaseDate") or ""
+    return best["episodeUrl"], {
+        "title": best.get("trackName") or ep_title,
+        "channel": best.get("collectionName", ""),
+        "upload_date_raw": release[:10].replace("-", "") if release else "",
+        "duration": int((best.get("trackTimeMillis") or 0) / 1000),
+    }
+
+
+def download_audio(url: str, out_dir: Path, status,
+                   progress=_NULL_PROGRESS) -> tuple[Path, dict]:
     """Download mono MP3 + return (audio_path, metadata dict)."""
     status("Downloading audio...")
+    progress.stage("download")
+
+    # Spotify never works through yt-dlp (DRM) — resolve to the episode's
+    # open-feed enclosure up front.
+    overrides: dict = {}
+    fetch_url = url
+    if "open.spotify.com/" in url:
+        fetch_url, overrides = resolve_spotify_episode(url, status)
+        status("Downloading audio...")
+
+    def _hook(d: dict) -> None:
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            if total:
+                progress.update(d.get("downloaded_bytes", 0) / total)
+        elif d.get("status") == "finished":
+            progress.update(1.0)
+
     tmpl = str(out_dir / "_tmp_%(id)s.%(ext)s")
     opts = {
         "format": "bestaudio/best",
@@ -227,7 +520,10 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "color": "no_color",  # raw ANSI codes would otherwise leak into
+                              # DownloadError.msg and garble the status text
         "ffmpeg_location": _ffmpeg_location(),
+        "progress_hooks": [_hook],
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -238,7 +534,16 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
         "postprocessor_args": ["-ac", "1"],  # mono
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        try:
+            info = ydl.extract_info(fetch_url, download=True)
+        except yt_dlp.utils.DownloadError:
+            if "podcasts.apple.com" not in fetch_url:
+                raise
+            # Apple's episode pages currently 500/block non-browser
+            # requests; fall back to the show's public RSS feed.
+            fetch_url, overrides = resolve_apple_episode(url, status)
+            status("Downloading audio...")
+            info = ydl.extract_info(fetch_url, download=True)
 
     video_id = info.get("id", "audio")
     tmp_path = out_dir / f"_tmp_{video_id}.mp3"
@@ -248,32 +553,39 @@ def download_audio(url: str, out_dir: Path, status) -> tuple[Path, dict]:
             raise RuntimeError("Audio download failed.")
         tmp_path = candidates[0]
 
-    title = info.get("title") or video_id
+    # When an Apple/Spotify link was resolved through its open RSS feed,
+    # the feed metadata (overrides) beats the generic extractor's, which
+    # only sees a bare enclosure URL.
+    title = overrides.get("title") or info.get("title") or video_id
     safe = sanitize_filename(title)
     project_dir = out_dir / safe
     project_dir.mkdir(exist_ok=True)
     final_audio = project_dir / "audio.mp3"
     tmp_path.replace(final_audio)
 
+    duration = info.get("duration") or overrides.get("duration") or 0
+    upload_date_raw = overrides.get("upload_date_raw") or info.get("upload_date") or ""
+
     status("Encoding audio...")
+    progress.stage("encode")
     reenc = final_audio.with_suffix(".enc.mp3")
-    subprocess.run(
-        [ffmpeg_exe(), "-y", "-i", str(final_audio),
+    _run_ffmpeg(
+        ["-i", str(final_audio),
          "-ar", "16000", "-ac", "1", "-b:a", "32k", str(reenc)],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=_NO_WINDOW,
+        duration=duration or None,
+        on_progress=progress.update,
     )
     reenc.replace(final_audio)
 
     meta = {
         "title": title,
         "safe_name": safe,
-        "channel": info.get("uploader") or info.get("channel") or "",
-        "upload_date_raw": info.get("upload_date") or "",
-        "upload_date": parse_upload_date(info.get("upload_date")),
-        "url": info.get("webpage_url") or url,
-        "platform": platform_from_extractor(info.get("extractor")),
-        "duration": info.get("duration") or 0,
+        "channel": overrides.get("channel") or info.get("uploader") or info.get("channel") or "",
+        "upload_date_raw": upload_date_raw,
+        "upload_date": parse_upload_date(upload_date_raw),
+        "url": url if overrides else (info.get("webpage_url") or url),
+        "platform": "podcast" if overrides else platform_from_extractor(info.get("extractor")),
+        "duration": duration,
         "audio_filename": "audio.mp3",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -296,7 +608,8 @@ def _unique_project_dir(base: Path, safe_name: str) -> tuple[Path, str]:
 
 
 def load_local_audio(src: Path, out_dir: Path, status,
-                     title: str | None = None) -> tuple[Path, dict]:
+                     title: str | None = None,
+                     progress=_NULL_PROGRESS) -> tuple[Path, dict]:
     """Re-encode a local audio/video file to mono MP3 + return (audio_path, metadata).
     title overrides the displayed title (default: src.stem) — used to avoid leaking
     upload-temp prefixes into the user-visible folder name."""
@@ -308,15 +621,17 @@ def load_local_audio(src: Path, out_dir: Path, status,
     project_dir, safe = _unique_project_dir(out_dir, safe_base)
     project_dir.mkdir(parents=True, exist_ok=True)
     final_audio = project_dir / "audio.mp3"
+    duration = _media_duration(src)
 
     status("Encoding audio...")
+    progress.stage("encode")
     try:
-        subprocess.run(
-            [ffmpeg_exe(), "-y", "-i", str(src),
+        _run_ffmpeg(
+            ["-i", str(src),
              "-vn", "-ar", "16000", "-ac", "1", "-b:a", f"{AUDIO_BITRATE_KBPS}k",
              str(final_audio)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=_NO_WINDOW,
+            duration=duration,
+            on_progress=progress.update,
         )
     except subprocess.CalledProcessError:
         # Clean up the empty project dir so we don't leave debris behind.
@@ -338,7 +653,7 @@ def load_local_audio(src: Path, out_dir: Path, status,
         "upload_date": "",
         "url": "",
         "platform": "local",
-        "duration": 0,
+        "duration": round(duration) if duration else 0,
         "audio_filename": "audio.mp3",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -354,36 +669,58 @@ def split_audio_if_needed(audio: Path, status) -> list[tuple[float, Path]]:
     chunk_dir.mkdir(exist_ok=True)
     seg_seconds = CHUNK_MINUTES * 60
     pattern = chunk_dir / "chunk_%03d.mp3"
-    subprocess.run(
+    _run_ffmpeg(
         [
-            ffmpeg_exe(), "-y", "-i", str(audio),
+            "-i", str(audio),
             "-f", "segment", "-segment_time", str(seg_seconds),
             "-ar", "16000", "-ac", "1", "-b:a", "32k", str(pattern),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_NO_WINDOW,
+        ]
     )
     chunks = sorted(chunk_dir.glob("chunk_*.mp3"))
     return [(i * seg_seconds, p) for i, p in enumerate(chunks)]
 
 
-def transcribe_with_groq(api_key: str, chunks: list[tuple[float, Path]], status, hints: str = "") -> list[Segment]:
+def transcribe_with_groq(api_key: str, chunks: list[tuple[float, Path]], status, hints: str = "",
+                         progress=_NULL_PROGRESS, total_seconds: float = 0.0) -> list[Segment]:
     status("Transcribing with Groq...")
+    progress.stage("transcribe")
     client = Groq(api_key=api_key)
     segments: list[Segment] = []
-    for offset, chunk in chunks:
-        with chunk.open("rb") as f:
-            kwargs = dict(
-                file=(chunk.name, f.read()),
-                model=GROQ_MODEL,
-                response_format="verbose_json",
-                timestamp_granularities=["segment", "word"],
-            )
-            if hints:
-                kwargs["prompt"] = hints
-            resp = client.audio.transcriptions.create(**kwargs)
+    for i, (offset, chunk) in enumerate(chunks):
+        # Chunk boundaries are real progress; the fill inside one chunk is
+        # an elapsed-time estimate (the API call is a single blocking POST).
+        if total_seconds > 0:
+            next_offset = chunks[i + 1][0] if i + 1 < len(chunks) else total_seconds
+            base = offset / total_seconds
+            span = max(0.0, (next_offset - offset) / total_seconds)
+            chunk_seconds = next_offset - offset
+        else:
+            base, span = i / len(chunks), 1 / len(chunks)
+            chunk_seconds = 0.0
+        expected = max(3.0, chunk_seconds * GROQ_REALTIME_RATIO) if chunk_seconds else 10.0
+        ticker_stop = threading.Event()
+
+        def _tick(base=base, span=span, expected=expected, stop=ticker_stop):
+            t0 = time.monotonic()
+            while not stop.wait(0.5):
+                frac = min(0.95, (time.monotonic() - t0) / expected)
+                progress.update(base + span * frac, estimated=True)
+
+        threading.Thread(target=_tick, daemon=True).start()
+        try:
+            with chunk.open("rb") as f:
+                kwargs = dict(
+                    file=(chunk.name, f.read()),
+                    model=GROQ_MODEL,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment", "word"],
+                )
+                if hints:
+                    kwargs["prompt"] = hints
+                resp = client.audio.transcriptions.create(**kwargs)
+        finally:
+            ticker_stop.set()
+        progress.update(base + span)
         def _get(obj, key, default=None):
             return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
@@ -414,16 +751,38 @@ def transcribe_with_groq(api_key: str, chunks: list[tuple[float, Path]], status,
     return segments
 
 
-def diarize_with_assemblyai(api_key: str, audio: Path, status) -> list[tuple[float, float, str]]:
+def diarize_with_assemblyai(api_key: str, audio: Path, status,
+                            progress=_NULL_PROGRESS,
+                            duration: float = 0.0,
+                            speakers_expected: int = 0) -> list[tuple[float, float, str]]:
     """Returns list of (start_sec, end_sec, speaker_label)."""
     status("Identifying speakers with AssemblyAI...")
+    progress.stage("diarize")
     aai.settings.api_key = api_key
-    config = aai.TranscriptionConfig(
-        speaker_labels=True,
-    )
-    transcript = aai.Transcriber().transcribe(str(audio), config=config)
+    # Telling the diarizer how many voices to expect is the single biggest
+    # lever on label quality; 0/blank means auto-detect.
+    kwargs = {"speaker_labels": True}
+    if speakers_expected and int(speakers_expected) > 0:
+        kwargs["speakers_expected"] = int(speakers_expected)
+    config = aai.TranscriptionConfig(**kwargs)
+    # submit + poll instead of the SDK's blocking transcribe() so the bar
+    # can move: queued/processing/completed transitions are real; the fill
+    # while processing is an elapsed-time estimate against the audio length.
+    transcript = aai.Transcriber().submit(str(audio), config=config)
+    expected = max(20.0, duration * AAI_REALTIME_RATIO) if duration else 60.0
+    t0 = time.monotonic()
+    while transcript.status not in (
+        aai.TranscriptStatus.completed, aai.TranscriptStatus.error
+    ):
+        frac = min(0.95, (time.monotonic() - t0) / expected)
+        if transcript.status == aai.TranscriptStatus.queued:
+            frac = min(frac, 0.05)
+        progress.update(frac, estimated=True)
+        time.sleep(3)
+        transcript = aai.Transcript.get_by_id(transcript.id)
     if transcript.status == aai.TranscriptStatus.error:
         raise RuntimeError(f"AssemblyAI error: {transcript.error}")
+    progress.update(1.0)
     out: list[tuple[float, float, str]] = []
     for utt in (transcript.utterances or []):
         out.append((utt.start / 1000.0, utt.end / 1000.0, f"Speaker {utt.speaker}"))
@@ -445,14 +804,39 @@ def align_speakers(segments: list[Segment], diar: list[tuple[float, float, str]]
         seg.speaker = best_label
 
 
+_SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]]?\s*$")
+
+
 def group_segments_by_speaker(segments: list[Segment]) -> list[dict]:
-    """Merge consecutive same-speaker segments into paragraphs for rendering."""
+    """Merge consecutive same-speaker segments into readable paragraphs.
+
+    A paragraph always ends on a speaker change. Within one speaker's turn
+    it also ends at a long pause between segments, or — once it has grown
+    past PARA_SOFT_CHARS — at the next sentence-ending segment (past
+    PARA_HARD_CHARS, at the next segment boundary regardless), so long
+    monologues don't render as one giant block. Whisper segments are
+    sentence-ish, so breaking between segments needs no word surgery.
+    Continuation paragraphs are marked "cont" so the repeated speaker
+    label can be de-emphasized.
+    """
     paragraphs: list[dict] = []
     for seg in segments:
-        if paragraphs and paragraphs[-1]["speaker"] == seg.speaker:
-            paragraphs[-1]["end"] = seg.end
-            paragraphs[-1]["text"] += " " + seg.text
-            paragraphs[-1]["words"].extend(seg.words)
+        prev = paragraphs[-1] if paragraphs else None
+        same_speaker = prev is not None and prev["speaker"] == seg.speaker
+        if same_speaker:
+            pause = seg.start - prev["end"]
+            length = len(prev["text"])
+            break_here = (
+                pause >= PARA_PAUSE_SECONDS
+                or length >= PARA_HARD_CHARS
+                or (length >= PARA_SOFT_CHARS and _SENTENCE_END.search(prev["text"]))
+            )
+        else:
+            break_here = True
+        if same_speaker and not break_here:
+            prev["end"] = seg.end
+            prev["text"] += " " + seg.text
+            prev["words"].extend(seg.words)
         else:
             paragraphs.append(
                 {
@@ -461,6 +845,7 @@ def group_segments_by_speaker(segments: list[Segment]) -> list[dict]:
                     "end": seg.end,
                     "text": seg.text,
                     "words": list(seg.words),
+                    "cont": same_speaker,
                 }
             )
     for p in paragraphs:
@@ -485,7 +870,12 @@ def read_css() -> str:
     return (resource_dir() / "static" / "style.css").read_text()
 
 
-def render_transcript(meta: dict, paragraphs: list[dict]) -> Path:
+def render_transcript(
+    meta: dict,
+    paragraphs: list[dict],
+    segments: list[Segment] | None = None,
+    diarization: list[tuple[float, float, str]] | None = None,
+) -> Path:
     env = jinja_env()
     template = env.get_template("transcript.html")
     html = template.render(meta=meta, paragraphs=paragraphs, css=read_css())
@@ -493,10 +883,131 @@ def render_transcript(meta: dict, paragraphs: list[dict]) -> Path:
     project_dir.mkdir(exist_ok=True)
     out = project_dir / "transcript.html"
     out.write_text(html, encoding="utf-8")
+    if segments is not None:
+        # Raw pipeline output. The rendered HTML is lossy (edits overwrite
+        # it), so this is the only place exact timings survive — it enables
+        # future re-rendering, re-diarization, and SRT/VTT export.
+        raw = {
+            "segments": [
+                {
+                    "start": s.start,
+                    "end": s.end,
+                    "text": s.text,
+                    "speaker": s.speaker,
+                    "words": s.words,
+                }
+                for s in segments
+            ],
+            "diarization": [
+                {"start": d[0], "end": d[1], "speaker": d[2]}
+                for d in (diarization or [])
+            ],
+        }
+        (project_dir / "segments.json").write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
     meta["transcribed_at"] = datetime.now().astimezone().isoformat()
     sidecar = project_dir / f"transcript{META_SUFFIX}"
     sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return out
+
+
+class _TranscriptDOMParser(HTMLParser):
+    """Extracts title and paragraph content from a rendered transcript.
+
+    Used by refresh_transcript to re-render an existing file through the
+    current template while preserving the user's edits (text, speaker
+    names, bookmarks, splits). Tracks only the stable DOM shape shared by
+    every template version: h1#transcript-title, article.paragraph
+    [data-start], .speaker[data-original], and .text with .word
+    [data-start] spans (or plain text)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.paragraphs: list[dict] = []
+        self._in_title = False
+        self._in_speaker = False
+        self._in_text = False
+        self._para: dict | None = None
+        self._word: dict | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        cls = (a.get("class") or "").split()
+        if tag == "h1" and a.get("id") == "transcript-title":
+            self._in_title = True
+        elif tag == "article" and "paragraph" in cls:
+            self._para = {
+                "start": float(a.get("data-start") or 0),
+                "speaker": "",
+                "original": a.get("data-original") or "",
+                "bookmarked": "bookmarked" in cls,
+                "words": [],
+                "text": "",
+            }
+        elif self._para is not None and tag == "span" and "speaker" in cls:
+            self._in_speaker = True
+            self._para["original"] = a.get("data-original") or ""
+        elif self._para is not None and tag == "p" and "text" in cls:
+            self._in_text = True
+        elif self._in_text and tag == "span" and "word" in cls:
+            self._word = {"word": "", "start": float(a.get("data-start") or 0)}
+
+    def handle_endtag(self, tag):
+        if tag == "h1" and self._in_title:
+            self._in_title = False
+        elif tag == "span" and self._word is not None:
+            self._word["word"] = self._word["word"].strip()
+            if self._word["word"]:
+                self._para["words"].append(self._word)
+            self._word = None
+        elif tag == "span" and self._in_speaker:
+            self._in_speaker = False
+        elif tag == "p" and self._in_text:
+            self._in_text = False
+        elif tag == "article" and self._para is not None:
+            self._para["text"] = " ".join(self._para["text"].split())
+            self.paragraphs.append(self._para)
+            self._para = None
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title += data
+        elif self._word is not None:
+            self._word["word"] += data
+        elif self._in_speaker:
+            self._para["speaker"] += data
+        elif self._in_text:
+            self._para["text"] += data
+
+
+def parse_transcript_html(path: Path) -> tuple[str, list[dict]]:
+    """(title, paragraphs-ready-for-the-template) parsed from a saved file."""
+    parser = _TranscriptDOMParser()
+    parser.feed(path.read_text(encoding="utf-8"))
+    parser.close()
+    paragraphs: list[dict] = []
+    prev_speaker = None
+    for p in parser.paragraphs:
+        speaker = " ".join(p["speaker"].split()) or "Speaker 1"
+        words = p["words"]
+        text = " ".join(w["word"] for w in words) if words else p["text"]
+        if not text:
+            continue
+        paragraphs.append({
+            "speaker": speaker,
+            "original": p["original"] or speaker,
+            "start": p["start"],
+            "end": p["start"],
+            "text": text,
+            "words": words,
+            "cont": prev_speaker == speaker,
+            "bookmarked": p["bookmarked"],
+            "start_label": format_timestamp(p["start"]),
+        })
+        prev_speaker = speaker
+    return " ".join(parser.title.split()), paragraphs
 
 
 def rebuild_library() -> Path:
@@ -511,6 +1022,7 @@ def rebuild_library() -> Path:
         html_path = sidecar.parent / "transcript.html"
         if not html_path.exists():
             continue
+        duration = float(m.get("duration") or 0)
         entries.append({
             "title": m.get("title", m.get("safe_name", "")),
             "channel": m.get("channel", ""),
@@ -520,6 +1032,8 @@ def rebuild_library() -> Path:
             "platform": m.get("platform", "generic"),
             "href": f"{sidecar.parent.name}/transcript.html",
             "body_text": extract_body_text(html_path),
+            "duration": duration,
+            "duration_label": format_timestamp(duration) if duration else "",
         })
     # Old flat layout: <Transcripts>/<safe>.meta.json (backwards compat)
     for sidecar in td.glob(f"*{META_SUFFIX}"):
@@ -530,6 +1044,7 @@ def rebuild_library() -> Path:
         html_path = td / f"{m['safe_name']}.html"
         if not html_path.exists():
             continue
+        duration = float(m.get("duration") or 0)
         entries.append({
             "title": m.get("title", m["safe_name"]),
             "channel": m.get("channel", ""),
@@ -539,6 +1054,8 @@ def rebuild_library() -> Path:
             "platform": m.get("platform", "generic"),
             "href": f"{m['safe_name']}.html",
             "body_text": extract_body_text(html_path),
+            "duration": duration,
+            "duration_label": format_timestamp(duration) if duration else "",
         })
     entries.sort(
         key=lambda e: e.get("transcribed_at") or e.get("upload_date_raw", ""),
@@ -639,7 +1156,7 @@ class Api:
         return {"ok": True}
 
     # Called by the Transcribe button in shell.html.
-    def transcribe(self, url: str, hints: str = "") -> None:
+    def transcribe(self, url: str, hints: str = "", speakers: int = 0) -> None:
         urls = [u.strip() for u in url.splitlines() if u.strip()]
         if not urls:
             self._js("updateStatus('Paste a URL first.')")
@@ -647,7 +1164,8 @@ class Api:
             return
         cfg = load_config()
         threading.Thread(
-            target=self._pipeline_queue, args=(urls, hints, cfg), daemon=True
+            target=self._pipeline_queue, args=(urls, hints, cfg),
+            kwargs={"speakers": speakers}, daemon=True
         ).start()
 
     # Chunked upload flow used by the Upload file button in shell.html.
@@ -680,7 +1198,8 @@ class Api:
             f.write(data)
         return True
 
-    def upload_finish(self, upload_id: str, hints: str = "") -> None:
+    def upload_finish(self, upload_id: str, hints: str = "",
+                      speakers: int = 0) -> None:
         with self._uploads_lock:
             entry = self._uploads.pop(upload_id, None)
         if entry is None:
@@ -694,7 +1213,8 @@ class Api:
         title = Path(original_filename).stem or "Uploaded audio"
         threading.Thread(
             target=self._pipeline_queue, args=([str(path)], hints, cfg),
-            kwargs={"is_file": True, "title": title}, daemon=True,
+            kwargs={"is_file": True, "title": title, "speakers": speakers},
+            daemon=True,
         ).start()
 
     def upload_cancel(self, upload_id: str) -> None:
@@ -708,14 +1228,16 @@ class Api:
                 pass
 
     def _pipeline_queue(self, sources: list[str], hints: str, cfg: dict,
-                        is_file: bool = False, title: str | None = None) -> None:
+                        is_file: bool = False, title: str | None = None,
+                        speakers: int = 0) -> None:
         total = len(sources)
         last_html: Path | None = None
         for i, src in enumerate(sources, 1):
             prefix = f"[{i}/{total}] " if total > 1 else ""
             try:
                 last_html = self._pipeline(src, hints, cfg, status_prefix=prefix,
-                                           is_file=is_file, title=title)
+                                           is_file=is_file, title=title,
+                                           speakers=speakers)
             except Exception as e:
                 label = "file" if is_file else "URL"
                 safe = str(e).replace("\\", "\\\\").replace("'", "\\'")
@@ -730,26 +1252,41 @@ class Api:
                 self._window.load_url(last_html.as_uri())
 
     def _pipeline(self, src: str, hints: str, cfg: dict, status_prefix: str = "",
-                  is_file: bool = False, title: str | None = None) -> Path:
+                  is_file: bool = False, title: str | None = None,
+                  speakers: int = 0) -> Path:
         def status(msg: str) -> None:
             safe = (status_prefix + msg).replace("\\", "\\\\").replace("'", "\\'")
             self._js(f"updateStatus('{safe}')")
 
+        def emit(payload: dict) -> None:
+            self._js(f"updateProgress({json.dumps(payload)})")
+
+        stages = ["encode"] if is_file else ["download", "encode"]
+        progress = _Progress(emit, stages + ["transcribe", "diarize", "render"])
+
         if is_file:
             audio, meta = load_local_audio(Path(src), transcripts_dir(), status,
-                                           title=title)
+                                           title=title, progress=progress)
         else:
-            audio, meta = download_audio(src, transcripts_dir(), status)
+            audio, meta = download_audio(src, transcripts_dir(), status,
+                                         progress=progress)
         chunks = split_audio_if_needed(audio, status)
-        segments = transcribe_with_groq(cfg["groq_api_key"], chunks, status, hints)
+        duration = float(meta.get("duration") or 0)
+        segments = transcribe_with_groq(cfg["groq_api_key"], chunks, status, hints,
+                                        progress=progress, total_seconds=duration)
         chunk_dir = audio.parent / "_chunks"
         if chunk_dir.exists():
             shutil.rmtree(chunk_dir, ignore_errors=True)
-        diar = diarize_with_assemblyai(cfg["assemblyai_api_key"], audio, status)
+        diar = diarize_with_assemblyai(cfg["assemblyai_api_key"], audio, status,
+                                       progress=progress, duration=duration,
+                                       speakers_expected=speakers)
         align_speakers(segments, diar)
+        progress.stage("render")
         paragraphs = group_segments_by_speaker(segments)
-        html_path = render_transcript(meta, paragraphs)
+        html_path = render_transcript(meta, paragraphs, segments=segments,
+                                      diarization=diar)
         rebuild_library()
+        progress.finish()
         status("Done!")
         return html_path
 
@@ -760,8 +1297,108 @@ class Api:
         path = (base / relative_path).resolve()
         if not str(path).startswith(str(base)):
             return False  # reject path traversal attempts
+        if path.exists():
+            # Keep the previous version as a one-step safety net, since
+            # autosave overwrites in place. Invisible to the library, which
+            # only globs */transcript.meta.json.
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".bak"))
+            except OSError:
+                pass
         path.write_text(html, encoding="utf-8")
+        self._sync_title_from_html(path.parent, html)
         return True
+
+    # An edited title lives in the saved HTML's <title>, but the library
+    # reads titles from the sidecar meta.json — keep the two in sync.
+    # Rebuilding the library re-reads every transcript, so only do it when
+    # the title actually changed.
+    def _sync_title_from_html(self, folder: Path, html: str) -> None:
+        m = re.search(r"<title>(.*?)</title>", html, re.S)
+        if not m:
+            return
+        title = html_unescape(m.group(1)).strip()
+        sidecar = folder / f"transcript{META_SUFFIX}"
+        if not title or not sidecar.exists():
+            return
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            if meta.get("title") == title:
+                return
+            meta["title"] = title
+            sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            rebuild_library()
+        except Exception:
+            pass
+
+    # Called by the ⟳ buttons in library.html. Re-renders an existing
+    # transcript through the CURRENT template, preserving the user's edits
+    # (text, speaker names, bookmarks, splits) parsed out of the saved DOM.
+    # This is how viewer upgrades reach transcripts generated before them.
+    # Keeps transcribed_at (library order) and segments.json untouched;
+    # backs the old file up to .bak. Returns "" on failure, leaving the
+    # original file as it was.
+    def refresh_transcript(self, folder: str) -> str:
+        base = transcripts_dir().resolve()
+        path = (base / folder).resolve()
+        html_path = path / "transcript.html"
+        sidecar = path / f"transcript{META_SUFFIX}"
+        if not (str(path).startswith(str(base))
+                and html_path.exists() and sidecar.exists()):
+            return ""
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            title, paragraphs = parse_transcript_html(html_path)
+            if not paragraphs:
+                return ""
+            if title:
+                meta["title"] = title
+            template = jinja_env().get_template("transcript.html")
+            html = template.render(meta=meta, paragraphs=paragraphs,
+                                   css=read_css())
+            shutil.copy2(html_path, html_path.with_name(html_path.name + ".bak"))
+            html_path.write_text(html, encoding="utf-8")
+            sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            return html_path.as_uri()
+        except Exception:
+            return ""
+
+    # Called by the rename (pencil) button in library.html. Updates the
+    # display title in the sidecar (which the library reads) and inside
+    # transcript.html (<title> and <h1>). The folder name stays unchanged:
+    # it is an opaque storage key, and renaming it can fail on Windows
+    # while the webview holds the folder's audio file open.
+    def rename_transcript(self, folder: str, new_title: str) -> str:
+        new_title = (new_title or "").strip()
+        base = transcripts_dir().resolve()
+        path = (base / folder).resolve()
+        if new_title and str(path).startswith(str(base)) and path.is_dir():
+            sidecar = path / f"transcript{META_SUFFIX}"
+            try:
+                meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                meta["title"] = new_title
+                sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            html_path = path / "transcript.html"
+            if html_path.exists():
+                try:
+                    esc = html_escape(new_title)
+                    doc = html_path.read_text(encoding="utf-8")
+                    doc = re.sub(
+                        r"<title>.*?</title>",
+                        lambda _: f"<title>{esc}</title>",
+                        doc, count=1, flags=re.S,
+                    )
+                    doc = re.sub(
+                        r'(<h1 id="transcript-title"[^>]*>).*?(</h1>)',
+                        lambda mm: mm.group(1) + esc + mm.group(2),
+                        doc, count=1, flags=re.S,
+                    )
+                    html_path.write_text(doc, encoding="utf-8")
+                except OSError:
+                    pass
+        return rebuild_library().as_uri()
 
     # Called by the Delete selected button in library.html.
     # folders is a list of subfolder names (e.g. ["goldman-sachs-ceo-..."]).
@@ -840,6 +1477,12 @@ def main() -> None:
 
     window.events.moved += _save_geometry
     window.events.resized += _save_geometry
+    # NOTE: do not call window.evaluate_js from a window.events.closing
+    # handler — on Windows the closing event runs on the UI thread and
+    # evaluate_js blocks waiting for a result only that same thread can
+    # produce, deadlocking the app ("not responding" on close). Unsaved
+    # edits are instead flushed by the page itself on window blur /
+    # visibilitychange, which fires before the window closes.
     webview.start()
 
 

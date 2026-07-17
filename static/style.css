@@ -117,11 +117,25 @@ body {
   padding: 6px 10px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   z-index: 6;
   box-shadow: -2px 2px 8px rgba(0,0,0,0.08);
 }
 #find-bar[hidden] { display: none; }
+#replace-row { display: flex; align-items: center; gap: 6px; width: 100%; }
+#replace-row[hidden] { display: none; }
+#replace-input {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+#replace-input:focus { outline: none; border-color: var(--accent); }
 #find-input {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -158,6 +172,12 @@ body {
 .paragraph.active { background: #eef2ff; }
 .paragraph.find-match { background: #fef9c3; }
 .paragraph.find-match-active { background: #fde047; outline: 2px solid #facc15; outline-offset: -2px; }
+
+/* Word-level find highlights (CSS Custom Highlight API — only color and
+   background-color apply inside ::highlight). The .find-match classes
+   above remain as the fallback for engines without the API. */
+::highlight(find-hl) { background-color: #fde68a; color: #1a1a1a; }
+::highlight(find-hl-active) { background-color: #f59e0b; color: #1a1a1a; }
 
 .play {
   grid-row: 1 / span 2;
@@ -361,6 +381,17 @@ body {
 }
 #lib-search:focus { outline: none; border-color: var(--accent); }
 
+#lib-sort {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.row .dur { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 #delete-btn {
   border: 1px solid #dc2626;
   background: #dc2626;
@@ -384,14 +415,14 @@ body {
 
 .row {
   display: grid;
-  grid-template-columns: 32px 1fr auto;
+  grid-template-columns: 32px 1fr auto auto auto;
   align-items: center;
   gap: 14px;
   padding: 14px 8px;
   text-decoration: none;
   color: var(--fg);
 }
-.entries.selecting .row { grid-template-columns: 20px 32px 1fr auto; cursor: pointer; }
+.entries.selecting .row { grid-template-columns: 20px 32px 1fr auto auto auto; cursor: pointer; }
 .row:hover { background: var(--hover); }
 .entry-check:checked ~ .title { color: var(--accent); }
 
@@ -401,6 +432,30 @@ body {
 
 .row .title { font-weight: 500; }
 .row .date { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.entry-actions { display: flex; gap: 2px; }
+.rename-btn, .refresh-btn {
+  border: none; background: none; cursor: pointer;
+  color: var(--muted); font-size: 14px; padding: 2px 6px; border-radius: 4px;
+}
+.rename-btn:hover, .refresh-btn:hover { color: var(--accent); background: var(--hover); }
+
+/* ---------- Popup menus (speaker picker, paragraph context menu) ---------- */
+
+.popup-menu {
+  position: fixed; z-index: 100; min-width: 180px; max-width: 320px;
+  max-height: 60vh; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 4px;
+}
+.menu-item {
+  display: block; width: 100%; text-align: left; border: none; background: none;
+  padding: 7px 10px; border-radius: 5px; cursor: pointer;
+  font-size: 14px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.menu-item:hover { background: var(--hover); }
+.menu-item.checked::after { content: ' ✓'; color: var(--accent); }
+.menu-sep { border-top: 1px solid var(--border); margin: 4px 6px; }
 
 /* ---------- Dark mode ---------- */
 
@@ -457,13 +512,17 @@ body {
 
   /* Library search */
   #lib-search { background: #1e293b; color: var(--fg); }
+  #lib-sort { background: #1e293b; color: var(--fg); }
 
   /* Find bar */
   #find-bar { box-shadow: -2px 2px 8px rgba(0,0,0,0.4); }
   #find-input { background: #1e293b; color: var(--fg); }
+  #replace-input { background: #1e293b; color: var(--fg); }
   #find-bar button { background: #1e293b; color: var(--fg); }
 
   /* Find match highlights */
   .paragraph.find-match        { background: #422006; }
   .paragraph.find-match-active { background: #713f12; outline-color: #92400e; }
+  ::highlight(find-hl) { background-color: #713f12; color: #fef3c7; }
+  ::highlight(find-hl-active) { background-color: #b45309; color: #ffffff; }
 }

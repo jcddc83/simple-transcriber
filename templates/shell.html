@@ -64,6 +64,24 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   min-height: 20px;
 }
 #status.error { color: #dc2626; }
+#progress-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+#progress-row[hidden] { display: none; }
+#progress {
+  flex: 1; height: 8px; border-radius: 4px;
+  background: var(--hover); overflow: hidden;
+}
+#progress-fill {
+  height: 100%; width: 0%; border-radius: 4px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+/* Estimated fill (elapsed-time guess, not a real signal): pulse + "~" pct */
+#progress-fill.estimated { animation: progress-pulse 1.6s ease-in-out infinite; }
+@keyframes progress-pulse { 50% { opacity: 0.55; } }
+#progress-pct {
+  font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums; min-width: 40px; text-align: right;
+}
 .divider { height: 1px; background: var(--border); margin: 24px 0; }
 .setup-note { font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
 .setup-note a { color: var(--accent); }
@@ -127,6 +145,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
       <input type="text" id="hints" placeholder="e.g. Jane Smith, Acme Corp, EBITDA">
       <p class="setup-note" style="margin:6px 0 0;font-size:12px">Helps the transcriber spell proper nouns correctly.</p>
     </div>
+    <div class="field">
+      <label for="speakers">Speakers (optional)</label>
+      <input type="number" id="speakers" min="1" max="10" placeholder="auto" style="width:110px">
+      <p class="setup-note" style="margin:6px 0 0;font-size:12px">How many voices to expect — the biggest lever on speaker-label accuracy. Leave blank to auto-detect.</p>
+    </div>
     <div class="btn-row">
       <button class="primary" id="go">Transcribe</button>
       <button id="upload-btn">Upload file</button>
@@ -134,6 +157,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
       <button id="folder">Open Folder</button>
     </div>
     <input type="file" id="audio-file" accept="audio/*,video/*" style="display:none">
+    <div id="progress-row" hidden>
+      <div id="progress"><div id="progress-fill"></div></div>
+      <span id="progress-pct"></span>
+    </div>
     <p id="status">Ready.</p>
   </section>
 
@@ -186,9 +213,10 @@ document.getElementById('go').addEventListener('click', () => {
   const url = document.getElementById('url').value.trim();
   if (!url) { updateStatus('Paste a URL first.'); return; }
   const hints = document.getElementById('hints').value.trim();
+  const speakers = parseInt(document.getElementById('speakers').value, 10) || 0;
   setBusy(true);
   updateStatus('Starting...');
-  pywebview.api.transcribe(url, hints);
+  pywebview.api.transcribe(url, hints, speakers);
 });
 
 // In the hints field (single-line input), Enter submits.
@@ -233,6 +261,7 @@ document.getElementById('audio-file').addEventListener('change', async (e) => {
   if (!file) return;
   if (pipelineBusy) return;
   const hints = document.getElementById('hints').value.trim();
+  const speakers = parseInt(document.getElementById('speakers').value, 10) || 0;
   setBusy(true);
   updateStatus('Uploading 0%...');
 
@@ -252,7 +281,7 @@ document.getElementById('audio-file').addEventListener('change', async (e) => {
       const pct = total ? Math.round(sent * 100 / total) : 100;
       updateStatus(`Uploading ${pct}%...`);
     }
-    await pywebview.api.upload_finish(uploadId, hints);
+    await pywebview.api.upload_finish(uploadId, hints, speakers);
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     updateStatus('Upload error: ' + msg);
@@ -278,8 +307,32 @@ function updateStatus(msg) {
   }
 }
 
+// Called from Python with {overall: 0-100, estimated: bool}. Estimated
+// portions (Groq intra-chunk, AssemblyAI fill) pulse and show "~NN%";
+// real signals (download bytes, encode time, chunk boundaries) don't.
+function updateProgress(p) {
+  const row = document.getElementById('progress-row');
+  if (!row) return;
+  const fill = document.getElementById('progress-fill');
+  const pct = document.getElementById('progress-pct');
+  const v = Math.max(0, Math.min(100, Math.round(p.overall || 0)));
+  row.hidden = false;
+  fill.style.width = v + '%';
+  fill.classList.toggle('estimated', !!p.estimated);
+  pct.textContent = (p.estimated ? '~' : '') + v + '%';
+}
+
+function hideProgress() {
+  const row = document.getElementById('progress-row');
+  if (!row) return;
+  row.hidden = true;
+  document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('progress-pct').textContent = '';
+}
+
 function onError() {
   setBusy(false);
+  hideProgress();
 }
 </script>
 </body>

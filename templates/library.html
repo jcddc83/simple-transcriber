@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>Transcripts</title>
-<style>{{ css }}</style>
+{# `safe`: see transcript.html — autoescaping corrupts quoted CSS values. #}
+<style>{{ css | safe }}</style>
 </head>
 <body>
 <nav class="topnav" id="topnav" style="display:none">
@@ -14,9 +15,16 @@
     <h1>Transcripts</h1>
     <div class="lib-actions">
       <input type="search" id="lib-search" placeholder="Search titles and transcripts…" autocomplete="off">
+      <select id="lib-sort" title="Sort transcripts">
+        <option value="newest" selected>Newest</option>
+        <option value="oldest">Oldest</option>
+        <option value="title">Title A–Z</option>
+        <option value="longest">Longest</option>
+      </select>
       <span class="count">{{ entries|length }} item{{ '' if entries|length == 1 else 's' }}</span>
       <button id="select-btn" style="display:none">Select</button>
       <button id="delete-btn" style="display:none" disabled>Delete</button>
+      <button id="refresh-all-btn" style="display:none" title="Re-render every transcript with the latest viewer features (backups are kept)">⟳ Update all</button>
       <button id="new-btn" style="display:none">⌂ Home</button>
     </div>
   </header>
@@ -26,7 +34,9 @@
   {% else %}
   <ul class="entries">
     {% for e in entries %}
-    <li class="entry" data-folder="{{ e.href.split('/')[0] }}" data-body="{{ e.body_text }}">
+    <li class="entry" data-folder="{{ e.href.split('/')[0] }}" data-body="{{ e.body_text }}"
+        data-title="{{ e.title|lower }}" data-sorttime="{{ e.transcribed_at or e.upload_date_raw }}"
+        data-duration="{{ e.duration or 0 }}">
       <a class="row" href="{{ e.href }}">
         <input type="checkbox" class="entry-check">
         <span class="icon icon-{{ e.platform }}">
@@ -36,7 +46,14 @@
           {% endif %}
         </span>
         <span class="title">{{ e.title }}</span>
+        <span class="dur">{{ e.duration_label }}</span>
         <span class="date">{{ e.upload_date }}</span>
+        <span class="entry-actions">
+          {% if '/' in e.href %}
+          <button class="rename-btn" title="Rename transcript" style="display:none">✎</button>
+          <button class="refresh-btn" title="Update this transcript to the latest features (a .bak backup is kept)" style="display:none">⟳</button>
+          {% endif %}
+        </span>
       </a>
     </li>
     {% endfor %}
@@ -44,6 +61,30 @@
   {% endif %}
 </main>
 <script>
+(function initSort() {
+  const sel = document.getElementById('lib-sort');
+  const list = document.querySelector('.entries');
+  if (!sel || !list) return;
+  const keys = {
+    newest:  li => li.dataset.sorttime || '',
+    oldest:  li => li.dataset.sorttime || '',
+    title:   li => li.dataset.title || '',
+    longest: li => parseFloat(li.dataset.duration) || 0,
+  };
+  sel.addEventListener('change', () => {
+    const mode = sel.value;
+    const key = keys[mode];
+    const desc = mode === 'newest' || mode === 'longest';
+    Array.from(list.querySelectorAll('.entry'))
+      .sort((a, b) => {
+        const ka = key(a), kb = key(b);
+        const cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+        return desc ? -cmp : cmp;
+      })
+      .forEach(li => list.appendChild(li));
+  });
+})();
+
 (function initSearch() {
   const input = document.getElementById('lib-search');
   if (!input) return;
@@ -81,6 +122,60 @@ function initPywebview() {
   const deleteBtn = document.getElementById('delete-btn');
   const entriesList = document.querySelector('.entries');
   if (!entriesList) return;  // no entries, nothing to delete
+
+  // Rename (pywebview only — needs the Python bridge to update metadata).
+  // Hidden for legacy flat-layout entries, which have no folder to target.
+  document.querySelectorAll('.rename-btn').forEach(btn => {
+    btn.style.display = '';
+    btn.addEventListener('click', async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const li = btn.closest('.entry');
+      const cur = li.querySelector('.title').textContent.trim();
+      const t = prompt('Rename transcript:', cur);
+      if (!t || !t.trim() || t.trim() === cur) return;
+      const url = await pywebview.api.rename_transcript(li.dataset.folder, t.trim());
+      window.location.href = url;
+    });
+  });
+
+  // Refresh: re-render a transcript through the latest template so old
+  // files pick up new viewer features. Edits are preserved; the previous
+  // version is kept as transcript.html.bak.
+  document.querySelectorAll('.refresh-btn').forEach(btn => {
+    btn.style.display = '';
+    btn.addEventListener('click', async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      btn.disabled = true;
+      const url = await pywebview.api.refresh_transcript(btn.closest('.entry').dataset.folder);
+      btn.disabled = false;
+      if (!url) { alert('Could not update this transcript — it was left unchanged.'); return; }
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = '⟳'; }, 1500);
+    });
+  });
+
+  const refreshAll = document.getElementById('refresh-all-btn');
+  const refreshables = Array.from(document.querySelectorAll('.entry'))
+    .filter(li => li.querySelector('.refresh-btn'));
+  if (refreshables.length) {
+    refreshAll.style.display = '';
+    refreshAll.addEventListener('click', async () => {
+      const n = refreshables.length;
+      if (!confirm(`Update ${n} transcript${n > 1 ? 's' : ''} to the latest features? A .bak backup of each is kept.`)) return;
+      refreshAll.disabled = true;
+      let done = 0, failed = 0;
+      for (const li of refreshables) {
+        const url = await pywebview.api.refresh_transcript(li.dataset.folder);
+        if (url) done++; else failed++;
+        refreshAll.textContent = `Updating ${done + failed}/${n}…`;
+      }
+      refreshAll.textContent = failed ? `Updated ${done}, ${failed} failed` : `✓ Updated ${done}`;
+      refreshAll.disabled = false;
+      setTimeout(() => { refreshAll.textContent = '⟳ Update all'; }, 4000);
+    });
+  }
 
   selectBtn.style.display = '';
   let selecting = false;
