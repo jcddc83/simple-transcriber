@@ -761,6 +761,9 @@ def diarize_with_assemblyai(api_key: str, audio: Path, status,
     aai.settings.api_key = api_key
     # Telling the diarizer how many voices to expect is the single biggest
     # lever on label quality; 0/blank means auto-detect.
+    # No speech_models here on purpose: AssemblyAI then serves whatever its
+    # current model is. Pinning one is what forced the universal-3-pro
+    # migration when that model was retired — don't reintroduce a pin.
     kwargs = {"speaker_labels": True}
     if speakers_expected and int(speakers_expected) > 0:
         kwargs["speakers_expected"] = int(speakers_expected)
