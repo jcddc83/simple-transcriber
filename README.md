@@ -178,6 +178,9 @@ uses WKWebView on macOS (built in, no extra dependency).
 
 ## Troubleshooting
 
+- **"AssemblyAI error" on every transcript (v1.1.0 or earlier)** — builds before
+  v1.2.0 requested a speech model that AssemblyAI retired on September 2, 2026.
+  Download the latest release; no config change or new API key is needed.
 - **"Windows protected your PC" on first launch** — because the app isn't
   code-signed, Windows SmartScreen shows an "unrecognized app" warning the
   first time you run the installer. Click **More info → Run anyway**. This is
