@@ -1232,18 +1232,41 @@ class Api:
                         speakers: int = 0) -> None:
         total = len(sources)
         last_html: Path | None = None
+        label = "file" if is_file else "URL"
+        succeeded = 0
+        failures: list[str] = []
+
+        def _js_safe(text: str) -> str:
+            return str(text).replace("\\", "\\\\").replace("'", "\\'")
+
         for i, src in enumerate(sources, 1):
             prefix = f"[{i}/{total}] " if total > 1 else ""
             try:
                 last_html = self._pipeline(src, hints, cfg, status_prefix=prefix,
                                            is_file=is_file, title=title,
                                            speakers=speakers)
+                succeeded += 1
             except Exception as e:
-                label = "file" if is_file else "URL"
-                safe = str(e).replace("\\", "\\\\").replace("'", "\\'")
-                self._js(f"updateStatus('Error on {label} {i}: {safe}')")
-                self._js("onError()")
-                return
+                # Skip and carry on. This used to return, so a single failure
+                # discarded the whole queue -- including items that had already
+                # transcribed successfully. yt-dlp is routinely throttled by
+                # YouTube, so one bad link in a batch was common and cost the
+                # entire run.
+                failures.append(f"{label} {i}")
+                self._js(f"updateStatus('Skipped {label} {i}: {_js_safe(e)}')")
+
+        if succeeded == 0:
+            detail = _js_safe(", ".join(failures)) if failures else "nothing to do"
+            self._js(f"updateStatus('All {total} item(s) failed: {detail}')")
+            self._js("onError()")
+            return
+
+        if failures:
+            detail = _js_safe(", ".join(failures))
+            self._js(
+                f"updateStatus('Transcribed {succeeded} of {total}. Skipped: {detail}')"
+            )
+
         if self._window:
             if total > 1:
                 lib_uri = (transcripts_dir() / "index.html").as_uri()
