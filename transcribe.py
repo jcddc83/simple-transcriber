@@ -287,6 +287,21 @@ def _ffmpeg_location() -> str | None:
     return str(d) if (d / exe).exists() else None
 
 
+def _ensure_js_runtime() -> None:
+    """YouTube extraction in current yt-dlp requires a JavaScript runtime;
+    without one it fails ("The page needs to be reloaded"). yt-dlp locates a
+    runtime (Deno) via PATH, so if we ship one alongside the app, put its
+    directory on PATH before yt-dlp looks. No-op when nothing is bundled —
+    yt-dlp then uses whatever Deno is already on the user's PATH."""
+    name = "deno.exe" if sys.platform.startswith("win") else "deno"
+    for d in (resource_dir(), app_dir()):
+        if (d / name).exists():
+            parts = os.environ.get("PATH", "").split(os.pathsep)
+            if str(d) not in parts:
+                os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+            return
+
+
 def _run_ffmpeg(args: list[str], duration: float | None = None,
                 on_progress=None) -> None:
     """Run ffmpeg. With duration + on_progress, parse `-progress` output and
@@ -496,6 +511,7 @@ def download_audio(url: str, out_dir: Path, status,
     """Download mono MP3 + return (audio_path, metadata dict)."""
     status("Downloading audio...")
     progress.stage("download")
+    _ensure_js_runtime()  # YouTube extraction needs a JS runtime (Deno) on PATH
 
     # Spotify never works through yt-dlp (DRM) — resolve to the episode's
     # open-feed enclosure up front.

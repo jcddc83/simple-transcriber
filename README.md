@@ -155,6 +155,13 @@ script). On Windows, the easiest FFmpeg install is via
 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) — download "release essentials",
 unzip, and drop `ffmpeg.exe` next to `transcribe.py`.
 
+YouTube transcription also needs a JavaScript runtime, which yt-dlp uses to
+extract the video. Install [Deno](https://deno.com/) (`winget install
+DenoLand.Deno`, or `irm https://deno.land/install.ps1 | iex`) and reopen your
+terminal — yt-dlp finds it on PATH automatically. Without it, YouTube URLs fail
+with "The page needs to be reloaded". Podcast/RSS URLs don't need it. (The
+packaged installer bundles Deno, so this only applies when running from source.)
+
 ## Building the installer
 
 ```cmd
@@ -162,9 +169,9 @@ build.bat
 iscc installer.iss
 ```
 
-`build.bat` downloads FFmpeg and the WebView2 bootstrapper automatically if
-they aren't already present, then packages everything into
-`dist\SimpleTranscriber.exe` via PyInstaller. `iscc installer.iss` (from
+`build.bat` downloads FFmpeg, the Deno JS runtime, and the WebView2
+bootstrapper automatically if they aren't already present, then packages
+everything into `dist\SimpleTranscriber.exe` via PyInstaller. `iscc installer.iss` (from
 [Inno Setup](https://jrsoftware.org/isinfo.php)) wraps it into
 `Output\SimpleTranscriber-Setup.exe`.
 
@@ -191,8 +198,15 @@ uses WKWebView on macOS (built in, no extra dependency).
   an exception for `SimpleTranscriber-Setup.exe`, or run from source instead.
 - **"ffmpeg not found"** (running from source) — make sure `ffmpeg.exe` is
   in the `transcriber/` folder or on your system PATH.
-- **YouTube rate-limited** — `yt-dlp` occasionally gets throttled by YouTube.
-  Wait an hour and try again, or run with browser cookies (advanced).
+- **"The page needs to be reloaded" on YouTube URLs** (running from source) —
+  yt-dlp needs a JavaScript runtime to extract YouTube videos. Install
+  [Deno](https://deno.com/) (`winget install DenoLand.Deno`) and reopen your
+  terminal. The packaged installer bundles Deno, so this only affects
+  source runs.
+- **YouTube rate-limited / HTTP 403** — `yt-dlp` occasionally gets throttled or
+  blocked by YouTube. Keeping yt-dlp current usually fixes it (`pip install -U
+  yt-dlp`); otherwise wait a while and retry, or run with browser cookies
+  (advanced).
 - **Audio >25MB after encoding** — automatic chunking handles it, but very
   long files (3+ hours) may need manual splitting.
 - **Window opens but stays blank** — make sure WebView2 Runtime is installed.
@@ -205,7 +219,8 @@ uses WKWebView on macOS (built in, no extra dependency).
 
 - Transcription: [Groq](https://groq.com) (whisper-large-v3)
 - Diarization: [AssemblyAI](https://www.assemblyai.com)
-- Audio download: [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- Audio download: [yt-dlp](https://github.com/yt-dlp/yt-dlp) (with the
+  [Deno](https://deno.com/) JS runtime for YouTube extraction)
 - Desktop window: [pywebview](https://pywebview.flowrl.com)
 - App icon: Transcription icons created by Freepik —
   [Flaticon](https://www.flaticon.com/free-icons/transcription)
