@@ -37,9 +37,17 @@ from pathlib import Path
 import assemblyai as aai
 from send2trash import send2trash
 import webview
-import yt_dlp
 from groq import Groq
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+# A newer yt-dlp downloaded by a previous run (see ytdlp_updater) lives in a
+# per-user folder. Activate it BEFORE importing yt_dlp so the fresh copy wins
+# over the snapshot frozen into the packaged app; this is a no-op when nothing
+# has been downloaded (e.g. source runs), leaving the normal import in place.
+import ytdlp_updater
+ytdlp_updater.activate_overlay()
+
+import yt_dlp  # noqa: E402  -- must follow activate_overlay()
 
 
 GROQ_MODEL = "whisper-large-v3"
@@ -1493,6 +1501,10 @@ def _wipe_orphan_uploads() -> None:
 def main() -> None:
     migrate_to_folders()
     _wipe_orphan_uploads()
+    # Silently check for a newer yt-dlp in the background; it applies next launch.
+    ytdlp_updater.start_background_update(
+        getattr(getattr(yt_dlp, "version", None), "__version__", "0")
+    )
     api = Api()
     shell_url = (resource_dir() / "templates" / "shell.html").as_uri()
     cfg = load_config()

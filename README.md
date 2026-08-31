@@ -126,6 +126,13 @@ Audio you transcribe is uploaded to Groq (transcription) and AssemblyAI
 training by default. Everything else — your API keys, the transcripts
 themselves, the library — stays on your machine.
 
+The packaged app also contacts [PyPI](https://pypi.org) on launch to check
+whether a newer `yt-dlp` is available (YouTube changes often, and the bundled
+copy would otherwise go stale). This sends no personal data — it's a version
+check and, if an update exists, a download of the public `yt-dlp` package,
+staged for the next launch. It runs only in the installed build, silently and
+in the background; a failure just falls back to the bundled copy.
+
 ## Limits
 
 - **Groq free tier** caps uploads at 25MB. The app encodes audio as mono MP3
