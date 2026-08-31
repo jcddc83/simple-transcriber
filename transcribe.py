@@ -524,14 +524,13 @@ def download_audio(url: str, out_dir: Path, status,
                               # DownloadError.msg and garble the status text
         "ffmpeg_location": _ffmpeg_location(),
         "progress_hooks": [_hook],
-        # YouTube routinely serves the default `web` client a media URL that
-        # then 403s ("unable to download video data: HTTP Error 403:
-        # Forbidden"). Asking for a few alternate player clients makes yt-dlp
-        # fall through to one whose format URLs aren't blocked. The key is
-        # namespaced under `youtube`, so it's a no-op for podcast/other feeds.
-        "extractor_args": {
-            "youtube": {"player_client": ["tv", "ios", "web_safari", "web"]},
-        },
+        # Deliberately DON'T pin youtube `player_client`: yt-dlp rotates its
+        # default clients as YouTube changes, and on machines without a JS
+        # runtime the signature-based clients (web/tv) 403 on the media URL
+        # ("unable to download video data: HTTP Error 403: Forbidden"). Left
+        # to its defaults yt-dlp falls back to a client that needs no JS (e.g.
+        # visionos, serving HLS audio), which downloads fine. Hard-coding a
+        # client list froze that choice onto the ones that 403.
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
