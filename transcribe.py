@@ -524,6 +524,14 @@ def download_audio(url: str, out_dir: Path, status,
                               # DownloadError.msg and garble the status text
         "ffmpeg_location": _ffmpeg_location(),
         "progress_hooks": [_hook],
+        # YouTube routinely serves the default `web` client a media URL that
+        # then 403s ("unable to download video data: HTTP Error 403:
+        # Forbidden"). Asking for a few alternate player clients makes yt-dlp
+        # fall through to one whose format URLs aren't blocked. The key is
+        # namespaced under `youtube`, so it's a no-op for podcast/other feeds.
+        "extractor_args": {
+            "youtube": {"player_client": ["tv", "ios", "web_safari", "web"]},
+        },
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -536,8 +544,17 @@ def download_audio(url: str, out_dir: Path, status,
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
             info = ydl.extract_info(fetch_url, download=True)
-        except yt_dlp.utils.DownloadError:
+        except yt_dlp.utils.DownloadError as e:
             if "podcasts.apple.com" not in fetch_url:
+                # A 403 that survives the player-client fallback almost always
+                # means YouTube changed something newer yt-dlp already handles.
+                # Point at the real fix instead of surfacing a raw 403.
+                if "403" in str(e) or "Forbidden" in str(e):
+                    raise RuntimeError(
+                        "YouTube refused the download (HTTP 403). This usually "
+                        "clears up by updating yt-dlp to the latest release: "
+                        "pip install -U yt-dlp"
+                    ) from e
                 raise
             # Apple's episode pages currently 500/block non-browser
             # requests; fall back to the show's public RSS feed.
