@@ -16,6 +16,10 @@ ffmpeg.exe
 ffprobe.exe
 ffmpeg-temp/
 ffmpeg-temp.zip
+deno.exe
+deno
+deno-temp/
+deno-temp.zip
 MicrosoftEdgeWebview2Setup.exe
 app.icns
 app.png

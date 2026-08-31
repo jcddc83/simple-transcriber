@@ -22,6 +22,18 @@ if not exist ffmpeg.exe (
   echo ffmpeg ready.
 )
 
+if not exist deno.exe (
+  echo Downloading Deno JS runtime...
+  curl -L "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip" -o deno-temp.zip
+  if errorlevel 1 goto :err
+  powershell -Command "Expand-Archive -Path deno-temp.zip -DestinationPath deno-temp -Force"
+  if errorlevel 1 goto :err
+  powershell -Command "Copy-Item (Get-ChildItem 'deno-temp\deno.exe' -Recurse | Select-Object -First 1).FullName deno.exe"
+  rmdir /s /q deno-temp
+  del deno-temp.zip
+  echo Deno ready.
+)
+
 if not exist MicrosoftEdgeWebview2Setup.exe (
   echo Downloading WebView2 bootstrapper...
   curl -L "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -o MicrosoftEdgeWebview2Setup.exe
@@ -37,6 +49,7 @@ python -m PyInstaller --onefile --windowed --name SimpleTranscriber ^
   --add-data "static;static" ^
   --add-binary "ffmpeg.exe;." ^
   --add-binary "ffprobe.exe;." ^
+  --add-binary "deno.exe;." ^
   --collect-all webview ^
   --hidden-import webview.platforms.edgechromium ^
   transcribe.py
