@@ -1,6 +1,6 @@
 [Setup]
 AppName=Simple Transcriber
-AppVersion=1.2
+AppVersion=1.2.1
 AppPublisher=James daSilva
 DefaultDirName={localappdata}\SimpleTranscriber
 DefaultGroupName=Simple Transcriber
